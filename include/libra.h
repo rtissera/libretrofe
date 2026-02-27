@@ -140,6 +140,12 @@ void libra_dispatch_keyboard(libra_ctx_t *ctx, bool down,
 void  *libra_get_memory_data(libra_ctx_t *ctx, unsigned id);
 size_t  libra_get_memory_size(libra_ctx_t *ctx, unsigned id);
 
+/* Memory map descriptors (for complex address spaces, e.g. PS1, N64).
+ * Returns the count of descriptors. *out is set to the internal array
+ * (struct retro_memory_descriptor* from libretro.h, cast to const void*).
+ * Valid while a game is loaded; returns 0 if no memory map was provided. */
+unsigned libra_get_memory_map(libra_ctx_t *ctx, const void **out);
+
 /* Returns true if the core can run without content (SET_SUPPORT_NO_GAME) */
 bool libra_supports_no_game(libra_ctx_t *ctx);
 

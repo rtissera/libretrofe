@@ -833,6 +833,16 @@ bool libra_supports_no_game(libra_ctx_t *ctx)
     return ctx && ctx->support_no_game;
 }
 
+unsigned libra_get_memory_map(libra_ctx_t *ctx, const void **out)
+{
+    if (!ctx || !ctx->memory_descriptors || ctx->memory_descriptor_count == 0) {
+        if (out) *out = NULL;
+        return 0;
+    }
+    if (out) *out = ctx->memory_descriptors;
+    return ctx->memory_descriptor_count;
+}
+
 void libra_set_target_refresh_rate(libra_ctx_t *ctx, float rate)
 {
     if (ctx)

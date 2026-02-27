@@ -354,6 +354,10 @@ bool libra_environment_cb(unsigned cmd, void *data)
             if (data) *(int *)data = RETRO_SAVESTATE_CONTEXT_NORMAL;
             return true;
 
+        case RETRO_ENVIRONMENT_GET_JIT_CAPABLE:
+            if (data) *(bool *)data = true;
+            return true;
+
         case RETRO_ENVIRONMENT_GET_TARGET_REFRESH_RATE:
             if (data)
                 *(float *)data = ctx->target_refresh_rate > 0.0f
@@ -525,6 +529,10 @@ bool libra_environment_cb(unsigned cmd, void *data)
             }
             return false; /* key not found */
         }
+
+        case RETRO_ENVIRONMENT_GET_DISK_CONTROL_INTERFACE_VERSION:
+            if (data) *(unsigned *)data = 1;
+            return true;
 
         /* ---- Disk control ------------------------------------------------- */
 
