@@ -24,12 +24,21 @@ typedef int16_t (*libra_input_state_cb_t)(void *ud,
 typedef void    (*libra_rumble_cb_t)(void *ud,
                     unsigned port, unsigned effect, uint16_t strength);
 
+/* Keyboard event callback — dispatched when core uses SET_KEYBOARD_CALLBACK.
+ * down: true=pressed, false=released.
+ * keycode: RETROK_* value from libretro.h.
+ * character: UTF-32 character, or 0 if unavailable.
+ * key_modifiers: RETROKMOD_* bitmask. */
+typedef void    (*libra_keyboard_cb_t)(void *ud, bool down,
+                    unsigned keycode, uint32_t character, uint16_t key_modifiers);
+
 typedef struct {
     libra_video_cb_t       video;
     libra_audio_cb_t       audio;
     libra_input_poll_cb_t  input_poll;
     libra_input_state_cb_t input_state;
     libra_rumble_cb_t      rumble;          /* optional; NULL = no rumble */
+    libra_keyboard_cb_t    keyboard;        /* optional; NULL = no keyboard events */
     void                  *userdata;
     unsigned               audio_output_rate;  /* target rate Hz, e.g. 48000 */
 } libra_config_t;
@@ -115,6 +124,31 @@ bool libra_load_game_special(libra_ctx_t *ctx, unsigned game_type,
 
 /* Returns true if the core called RETRO_ENVIRONMENT_SHUTDOWN */
 bool libra_is_shutdown_requested(libra_ctx_t *ctx);
+
+/* Video rotation requested by core (0=0°, 1=90°, 2=180°, 3=270° CCW) */
+unsigned libra_get_rotation(libra_ctx_t *ctx);
+
+/* Dispatch a keyboard event to the core (if it registered SET_KEYBOARD_CALLBACK).
+ * Call this from the host's key event handler.
+ * keycode: RETROK_* value; character: UTF-32; key_modifiers: RETROKMOD_* bitmask */
+void libra_dispatch_keyboard(libra_ctx_t *ctx, bool down,
+                              unsigned keycode, uint32_t character,
+                              uint16_t key_modifiers);
+
+/* Core memory access (for achievements integration, debugging, etc.)
+ * id: RETRO_MEMORY_SAVE_RAM, RETRO_MEMORY_RTC, RETRO_MEMORY_SYSTEM_RAM, etc. */
+void  *libra_get_memory_data(libra_ctx_t *ctx, unsigned id);
+size_t  libra_get_memory_size(libra_ctx_t *ctx, unsigned id);
+
+/* Returns true if the core can run without content (SET_SUPPORT_NO_GAME) */
+bool libra_supports_no_game(libra_ctx_t *ctx);
+
+/* Set the target display refresh rate reported to the core (default: 60 Hz) */
+void libra_set_target_refresh_rate(libra_ctx_t *ctx, float rate);
+
+/* Invoke the core's options-update-display callback if registered.
+ * Returns true if option visibility changed. Call before rendering options UI. */
+bool libra_update_option_visibility(libra_ctx_t *ctx);
 
 #ifdef __cplusplus
 }

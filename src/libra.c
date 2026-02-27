@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 
 /* -------------------------------------------------------------------------
  * Global libretro callbacks — cores call these; we dispatch to s_ctx.
@@ -50,6 +51,17 @@ static int16_t input_state_cb(unsigned port, unsigned device,
     if (s_active)
         return libra_input_state(s_active, port, device, index, id);
     return 0;
+}
+
+/* -------------------------------------------------------------------------
+ * Helpers
+ * ---------------------------------------------------------------------- */
+
+static int64_t get_time_usec(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
 
 /* -------------------------------------------------------------------------
@@ -237,6 +249,11 @@ void libra_unload_game(libra_ctx_t *ctx)
     free(ctx->sram_shadow);
     ctx->sram_shadow      = NULL;
     ctx->sram_shadow_size = 0;
+
+    /* Reset per-game state */
+    ctx->frame_time_last       = 0;
+    ctx->memory_descriptors    = NULL;
+    ctx->memory_descriptor_count = 0;
 }
 
 void libra_run(libra_ctx_t *ctx)
@@ -246,6 +263,22 @@ void libra_run(libra_ctx_t *ctx)
 
     s_active = ctx;
     libra_environment_set_ctx(ctx);
+
+    /* Dispatch frame time callback if core registered one */
+    if (ctx->frame_time_cb) {
+        int64_t now = get_time_usec();
+        int64_t delta;
+        if (ctx->frame_time_last == 0)
+            delta = ctx->frame_time_reference;
+        else
+            delta = now - ctx->frame_time_last;
+        /* During fast-forward pass the ideal reference time */
+        if (ctx->fast_forwarding && ctx->frame_time_reference > 0)
+            delta = ctx->frame_time_reference;
+        ctx->frame_time_last = now;
+        ctx->frame_time_cb(delta);
+    }
+
     ctx->core->retro_run();
 
     /* Flush resampled audio to host */
@@ -739,4 +772,78 @@ bool libra_save_sram_if_dirty(libra_ctx_t *ctx, const char *path)
 bool libra_is_shutdown_requested(libra_ctx_t *ctx)
 {
     return ctx && ctx->shutdown_requested;
+}
+
+/* -------------------------------------------------------------------------
+ * Rotation
+ * ---------------------------------------------------------------------- */
+
+unsigned libra_get_rotation(libra_ctx_t *ctx)
+{
+    return ctx ? ctx->rotation : 0;
+}
+
+/* -------------------------------------------------------------------------
+ * Keyboard dispatch
+ * ---------------------------------------------------------------------- */
+
+void libra_dispatch_keyboard(libra_ctx_t *ctx, bool down,
+                              unsigned keycode, uint32_t character,
+                              uint16_t key_modifiers)
+{
+    if (!ctx)
+        return;
+    /* Forward to core's keyboard callback if registered */
+    if (ctx->keyboard_cb)
+        ctx->keyboard_cb(down, keycode, character, key_modifiers);
+    /* Also forward to host callback if registered */
+    if (ctx->config.keyboard)
+        ctx->config.keyboard(ctx->config.userdata, down, keycode,
+                             character, key_modifiers);
+}
+
+/* -------------------------------------------------------------------------
+ * Memory access
+ * ---------------------------------------------------------------------- */
+
+void *libra_get_memory_data(libra_ctx_t *ctx, unsigned id)
+{
+    if (!ctx || !ctx->core || !ctx->game_loaded)
+        return NULL;
+    if (!ctx->core->retro_get_memory_data)
+        return NULL;
+    return ctx->core->retro_get_memory_data(id);
+}
+
+size_t libra_get_memory_size(libra_ctx_t *ctx, unsigned id)
+{
+    if (!ctx || !ctx->core || !ctx->game_loaded)
+        return 0;
+    if (!ctx->core->retro_get_memory_size)
+        return 0;
+    return ctx->core->retro_get_memory_size(id);
+}
+
+/* -------------------------------------------------------------------------
+ * Misc queries
+ * ---------------------------------------------------------------------- */
+
+bool libra_supports_no_game(libra_ctx_t *ctx)
+{
+    return ctx && ctx->support_no_game;
+}
+
+void libra_set_target_refresh_rate(libra_ctx_t *ctx, float rate)
+{
+    if (ctx)
+        ctx->target_refresh_rate = rate;
+}
+
+bool libra_update_option_visibility(libra_ctx_t *ctx)
+{
+    if (!ctx || !ctx->options_update_display_cb)
+        return false;
+    s_active = ctx;
+    libra_environment_set_ctx(ctx);
+    return ctx->options_update_display_cb();
 }

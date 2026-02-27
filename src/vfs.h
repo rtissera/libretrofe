@@ -4,8 +4,8 @@
 
 #include "libretro.h"
 
-/* VFS API version we implement (v1=basic, v2=+truncate) */
-#define LIBRA_VFS_VERSION 2
+/* VFS API version we implement (v1=basic, v2=+truncate, v3=+stat/dir) */
+#define LIBRA_VFS_VERSION 3
 
 struct retro_vfs_interface *libra_vfs_get_interface(void);
 

@@ -7,6 +7,8 @@
 #include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
+#include <sys/time.h>
 
 /* Thread-local context pointer set before retro_run() and init calls */
 static libra_ctx_t *s_ctx = NULL;
@@ -97,6 +99,41 @@ static bool rumble_set_state(unsigned port,
 }
 
 /* -------------------------------------------------------------------------
+ * Performance interface stubs
+ * ---------------------------------------------------------------------- */
+
+static retro_time_t perf_get_time_usec(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (retro_time_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
+static retro_perf_tick_t perf_get_counter(void)
+{
+    return (retro_perf_tick_t)perf_get_time_usec();
+}
+
+static uint64_t perf_get_cpu_features(void) { return 0; }
+static void perf_register(struct retro_perf_counter *counter)
+{
+    if (counter) counter->registered = true;
+}
+static void perf_start(struct retro_perf_counter *counter)
+{
+    if (counter) {
+        counter->start    = perf_get_counter();
+        counter->call_cnt++;
+    }
+}
+static void perf_stop(struct retro_perf_counter *counter)
+{
+    if (counter)
+        counter->total += perf_get_counter() - counter->start;
+}
+static void perf_log(void) { /* no-op */ }
+
+/* -------------------------------------------------------------------------
  * Main environment callback
  * ---------------------------------------------------------------------- */
 
@@ -118,7 +155,19 @@ bool libra_environment_cb(unsigned cmd, void *data)
             ctx->shutdown_requested = true;
             return true;
 
+        case RETRO_ENVIRONMENT_GET_OVERSCAN:
+            if (data) *(bool *)data = false; /* crop overscan */
+            return true;
+
+        case RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME:
+            if (data) ctx->support_no_game = *(const bool *)data;
+            return true;
+
         /* ---- Video -------------------------------------------------------- */
+
+        case RETRO_ENVIRONMENT_SET_ROTATION:
+            if (data) ctx->rotation = *(const unsigned *)data & 3;
+            return true;
 
         case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:
             ctx->pixel_format = *(const enum retro_pixel_format *)data;
@@ -239,10 +288,89 @@ bool libra_environment_cb(unsigned cmd, void *data)
             return true;
         }
 
-        /* ---- Misc no-ops -------------------------------------------------- */
+        /* ---- Keyboard callback -------------------------------------------- */
 
-        case RETRO_ENVIRONMENT_SET_MEMORY_MAPS:
+        case RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK: {
+            const struct retro_keyboard_callback *cb =
+                (const struct retro_keyboard_callback *)data;
+            ctx->keyboard_cb = cb ? cb->callback : NULL;
             return true;
+        }
+
+        /* ---- Frame time --------------------------------------------------- */
+
+        case RETRO_ENVIRONMENT_SET_FRAME_TIME_CALLBACK: {
+            const struct retro_frame_time_callback *cb =
+                (const struct retro_frame_time_callback *)data;
+            if (cb) {
+                ctx->frame_time_cb        = cb->callback;
+                ctx->frame_time_reference = cb->reference;
+            } else {
+                ctx->frame_time_cb        = NULL;
+                ctx->frame_time_reference = 0;
+            }
+            return true;
+        }
+
+        /* ---- Input queries ------------------------------------------------ */
+
+        case RETRO_ENVIRONMENT_GET_INPUT_DEVICE_CAPABILITIES:
+            if (data)
+                *(uint64_t *)data = (1 << RETRO_DEVICE_JOYPAD)
+                                  | (1 << RETRO_DEVICE_ANALOG)
+                                  | (1 << RETRO_DEVICE_KEYBOARD);
+            return true;
+
+        case RETRO_ENVIRONMENT_GET_INPUT_MAX_USERS:
+            if (data) *(unsigned *)data = LIBRA_MAX_PORTS;
+            return true;
+
+        /* ---- Performance interface ---------------------------------------- */
+
+        case RETRO_ENVIRONMENT_GET_PERF_INTERFACE: {
+            struct retro_perf_callback *cb =
+                (struct retro_perf_callback *)data;
+            cb->get_time_usec  = perf_get_time_usec;
+            cb->get_cpu_features = perf_get_cpu_features;
+            cb->get_perf_counter = perf_get_counter;
+            cb->perf_register    = perf_register;
+            cb->perf_start       = perf_start;
+            cb->perf_stop        = perf_stop;
+            cb->perf_log         = perf_log;
+            return true;
+        }
+
+        /* ---- Misc queries ------------------------------------------------- */
+
+        case RETRO_ENVIRONMENT_GET_MESSAGE_INTERFACE_VERSION:
+            if (data) *(unsigned *)data = 1;
+            return true;
+
+        case RETRO_ENVIRONMENT_SET_SERIALIZATION_QUIRKS:
+            if (data) ctx->serialization_quirks = *(const uint64_t *)data;
+            return true;
+
+        case RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT:
+            if (data) *(int *)data = RETRO_SAVESTATE_CONTEXT_NORMAL;
+            return true;
+
+        case RETRO_ENVIRONMENT_GET_TARGET_REFRESH_RATE:
+            if (data)
+                *(float *)data = ctx->target_refresh_rate > 0.0f
+                    ? ctx->target_refresh_rate : 60.0f;
+            return true;
+
+        /* ---- Memory maps -------------------------------------------------- */
+
+        case RETRO_ENVIRONMENT_SET_MEMORY_MAPS: {
+            const struct retro_memory_map *map =
+                (const struct retro_memory_map *)data;
+            if (map) {
+                ctx->memory_descriptors      = map->descriptors;
+                ctx->memory_descriptor_count  = map->num_descriptors;
+            }
+            return true;
+        }
 
         case RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS:
             return true;
@@ -371,6 +499,31 @@ bool libra_environment_cb(unsigned cmd, void *data)
                 }
             }
             return false;
+        }
+
+        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_UPDATE_DISPLAY_CALLBACK: {
+            const struct retro_core_options_update_display_callback *cb =
+                (const struct retro_core_options_update_display_callback *)data;
+            ctx->options_update_display_cb = cb ? cb->callback : NULL;
+            return true;
+        }
+
+        case RETRO_ENVIRONMENT_SET_VARIABLE: {
+            const struct retro_variable *var =
+                (const struct retro_variable *)data;
+            if (!var) return true; /* capability probe */
+            if (!var->key || !var->value) return false;
+            for (unsigned i = 0; i < ctx->opt_count; i++) {
+                if (strcmp(ctx->opt_keys[i], var->key) == 0) {
+                    if (strcmp(ctx->opt_vals[i], var->value) != 0) {
+                        free(ctx->opt_vals[i]);
+                        ctx->opt_vals[i] = strdup(var->value);
+                        ctx->opt_updated = true;
+                    }
+                    return true;
+                }
+            }
+            return false; /* key not found */
         }
 
         /* ---- Disk control ------------------------------------------------- */

@@ -8,6 +8,7 @@
 #include "libretro.h"
 
 #define LIBRA_MAX_OPTIONS 128
+#define LIBRA_MAX_PORTS   8
 
 struct libra_ctx {
     libra_config_t  config;
@@ -31,6 +32,9 @@ struct libra_ctx {
     unsigned        opt_count;
     bool            opt_updated;
 
+    /* Core options update display callback (core requests visibility refresh) */
+    retro_core_options_update_display_callback_t options_update_display_cb;
+
     /* SRAM dirty-detection shadow copy */
     uint8_t        *sram_shadow;
     size_t          sram_shadow_size;
@@ -47,6 +51,30 @@ struct libra_ctx {
     /* Subsystem info (static data owned by the core) */
     const struct retro_subsystem_info *subsystem_info;
     unsigned                           subsystem_count;
+
+    /* Video rotation (0-3: 0°, 90°, 180°, 270° counter-clockwise) */
+    unsigned        rotation;
+
+    /* Keyboard callback (used by DOSBox, ScummVM, VICE, etc.) */
+    retro_keyboard_event_t keyboard_cb;
+
+    /* Frame time callback (called before each retro_run) */
+    retro_frame_time_callback_t frame_time_cb;
+    retro_usec_t    frame_time_reference;   /* ideal frame duration in usec */
+    retro_usec_t    frame_time_last;        /* timestamp of last retro_run */
+
+    /* Serialization quirks bitmask from core */
+    uint64_t        serialization_quirks;
+
+    /* Core declared it can run without content */
+    bool            support_no_game;
+
+    /* Memory map provided by core (pointers owned by core, valid while loaded) */
+    const struct retro_memory_descriptor *memory_descriptors;
+    unsigned        memory_descriptor_count;
+
+    /* Target display refresh rate (set by host, reported to core) */
+    float           target_refresh_rate;
 };
 
 #endif /* LIBRA_INTERNAL_H */
