@@ -161,6 +161,11 @@ void libra_set_target_refresh_rate(libra_ctx_t *ctx, float rate);
  * Returns true if option visibility changed. Call before rendering options UI. */
 bool libra_update_option_visibility(libra_ctx_t *ctx);
 
+/* Poll latest core message (SET_MESSAGE / SET_MESSAGE_EXT).
+ * Returns message text, or NULL if no pending message.
+ * Calling this clears the pending flag. *frames receives display duration. */
+const char *libra_poll_message(libra_ctx_t *ctx, unsigned *frames);
+
 #ifdef __cplusplus
 }
 #endif

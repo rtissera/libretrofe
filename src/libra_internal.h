@@ -75,6 +75,11 @@ struct libra_ctx {
 
     /* Target display refresh rate (set by host, reported to core) */
     float           target_refresh_rate;
+
+    /* Message from core (SET_MESSAGE / SET_MESSAGE_EXT) */
+    char            message_buf[512];
+    unsigned        message_frames;
+    bool            message_pending;
 };
 
 #endif /* LIBRA_INTERNAL_H */

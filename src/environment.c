@@ -236,13 +236,15 @@ bool libra_environment_cb(unsigned cmd, void *data)
         case RETRO_ENVIRONMENT_SET_MESSAGE: {
             const struct retro_message *msg = (const struct retro_message *)data;
             fprintf(stderr, "libra [MSG] %s\n", msg->msg);
+            snprintf(ctx->message_buf, sizeof(ctx->message_buf), "%s", msg->msg);
+            ctx->message_frames = msg->frames;
+            ctx->message_pending = true;
             return true;
         }
 
         case RETRO_ENVIRONMENT_SET_MESSAGE_EXT: {
             const struct retro_message_ext *msg =
                 (const struct retro_message_ext *)data;
-            /* Route to log or OSD — we just forward to stderr */
             const char *lvl;
             switch (msg->level) {
                 case RETRO_LOG_DEBUG: lvl = "[DEBUG]"; break;
@@ -251,6 +253,12 @@ bool libra_environment_cb(unsigned cmd, void *data)
                 default:              lvl = "[INFO] "; break;
             }
             fprintf(stderr, "libra %s %s\n", lvl, msg->msg);
+            /* Store for host OSD (skip pure-log messages) */
+            if (msg->target != RETRO_MESSAGE_TARGET_LOG) {
+                snprintf(ctx->message_buf, sizeof(ctx->message_buf), "%s", msg->msg);
+                ctx->message_frames = msg->duration;
+                ctx->message_pending = true;
+            }
             return true;
         }
 
@@ -381,6 +389,17 @@ bool libra_environment_cb(unsigned cmd, void *data)
 
         case RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL:
             return true;
+
+        /* ---- LED interface (stub) ----------------------------------------- */
+
+        case RETRO_ENVIRONMENT_GET_LED_INTERFACE: {
+            /* Accept the interface but use a no-op callback.
+             * Cores may refuse to load if we return false. */
+            struct retro_led_interface *led =
+                (struct retro_led_interface *)data;
+            if (led) led->set_led_state = NULL; /* no LED support */
+            return true;
+        }
 
         /* ---- Core options ------------------------------------------------- */
 

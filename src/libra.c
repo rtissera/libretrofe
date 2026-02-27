@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#include <zlib.h>
 
 /* -------------------------------------------------------------------------
  * Global libretro callbacks — cores call these; we dispatch to s_ctx.
@@ -376,6 +377,10 @@ void libra_set_option(libra_ctx_t *ctx, const char *key, const char *value)
  * Save states
  * ---------------------------------------------------------------------- */
 
+/* Magic header for compressed save states: "LBZn" + 4-byte uncompressed size (LE) */
+static const char LIBRA_ZLIB_MAGIC[4] = { 'L', 'B', 'Z', '1' };
+#define LIBRA_ZLIB_HDR_SIZE 8
+
 bool libra_save_state(libra_ctx_t *ctx, const char *path)
 {
     if (!ctx || !ctx->core || !ctx->game_loaded || !path)
@@ -406,7 +411,30 @@ bool libra_save_state(libra_ctx_t *ctx, const char *path)
         return false;
     }
 
-    bool ok = (fwrite(buf, 1, size, f) == size);
+    /* Compress with zlib */
+    uLongf comp_bound = compressBound((uLong)size);
+    void *comp = malloc(LIBRA_ZLIB_HDR_SIZE + comp_bound);
+    bool ok = false;
+    if (comp) {
+        uLongf comp_size = comp_bound;
+        if (compress2((Bytef *)comp + LIBRA_ZLIB_HDR_SIZE, &comp_size,
+                       (const Bytef *)buf, (uLong)size, Z_DEFAULT_COMPRESSION) == Z_OK) {
+            /* Write header: magic + uncompressed size (LE 32-bit) */
+            memcpy(comp, LIBRA_ZLIB_MAGIC, 4);
+            uint32_t raw_le = (uint32_t)size;
+            memcpy((char *)comp + 4, &raw_le, 4);
+            ok = (fwrite(comp, 1, LIBRA_ZLIB_HDR_SIZE + comp_size, f)
+                  == LIBRA_ZLIB_HDR_SIZE + comp_size);
+        }
+        free(comp);
+    }
+
+    /* Fallback: write uncompressed if compression failed */
+    if (!ok) {
+        rewind(f);
+        ok = (fwrite(buf, 1, size, f) == size);
+    }
+
     fclose(f);
     free(buf);
     if (!ok)
@@ -435,28 +463,57 @@ bool libra_load_state(libra_ctx_t *ctx, const char *path)
     long fsize = ftell(f);
     rewind(f);
 
-    if (fsize <= 0 || (size_t)fsize < expected) {
-        fprintf(stderr, "libra: state file '%s' is too small (%ld < %zu)\n",
-                path, fsize, expected);
+    if (fsize <= 0) {
         fclose(f);
         return false;
     }
 
-    void *buf = malloc((size_t)fsize);
-    if (!buf) {
+    void *raw = malloc((size_t)fsize);
+    if (!raw) {
         fclose(f);
         return false;
     }
 
-    bool ok = (fread(buf, 1, (size_t)fsize, f) == (size_t)fsize);
+    bool ok = (fread(raw, 1, (size_t)fsize, f) == (size_t)fsize);
     fclose(f);
-
-    if (ok)
-        ok = ctx->core->retro_unserialize(buf, (size_t)fsize);
-    else
+    if (!ok) {
         fprintf(stderr, "libra: short read from '%s'\n", path);
+        free(raw);
+        return false;
+    }
 
-    free(buf);
+    /* Check for zlib-compressed header */
+    if ((size_t)fsize > LIBRA_ZLIB_HDR_SIZE &&
+        memcmp(raw, LIBRA_ZLIB_MAGIC, 4) == 0) {
+        uint32_t raw_size;
+        memcpy(&raw_size, (char *)raw + 4, 4);
+        void *decomp = malloc(raw_size);
+        if (decomp) {
+            uLongf dest_len = raw_size;
+            if (uncompress((Bytef *)decomp, &dest_len,
+                            (const Bytef *)raw + LIBRA_ZLIB_HDR_SIZE,
+                            (uLong)fsize - LIBRA_ZLIB_HDR_SIZE) == Z_OK) {
+                ok = ctx->core->retro_unserialize(decomp, dest_len);
+            } else {
+                fprintf(stderr, "libra: zlib decompress failed for '%s'\n", path);
+                ok = false;
+            }
+            free(decomp);
+        } else {
+            ok = false;
+        }
+    } else {
+        /* Uncompressed (legacy) state */
+        if ((size_t)fsize < expected) {
+            fprintf(stderr, "libra: state file '%s' is too small (%ld < %zu)\n",
+                    path, fsize, expected);
+            ok = false;
+        } else {
+            ok = ctx->core->retro_unserialize(raw, (size_t)fsize);
+        }
+    }
+
+    free(raw);
     return ok;
 }
 
@@ -887,4 +944,13 @@ bool libra_update_option_visibility(libra_ctx_t *ctx)
     s_active = ctx;
     libra_environment_set_ctx(ctx);
     return ctx->options_update_display_cb();
+}
+
+const char *libra_poll_message(libra_ctx_t *ctx, unsigned *frames)
+{
+    if (!ctx || !ctx->message_pending)
+        return NULL;
+    ctx->message_pending = false;
+    if (frames) *frames = ctx->message_frames;
+    return ctx->message_buf;
 }

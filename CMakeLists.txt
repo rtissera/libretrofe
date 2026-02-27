@@ -25,8 +25,10 @@ target_include_directories(libra
         deps
 )
 
+find_package(ZLIB REQUIRED)
+
 target_compile_options(libra PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(libra PRIVATE ${CMAKE_DL_LIBS} m)
+target_link_libraries(libra PRIVATE ${CMAKE_DL_LIBS} m ZLIB::ZLIB)
 
 if(BUILD_SHARED_LIBS)
     set_target_properties(libra PROPERTIES
