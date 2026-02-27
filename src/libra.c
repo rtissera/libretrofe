@@ -461,6 +461,37 @@ bool libra_load_state(libra_ctx_t *ctx, const char *path)
 }
 
 /* -------------------------------------------------------------------------
+ * Memory-based serialization (for run-ahead / rewind)
+ * ---------------------------------------------------------------------- */
+
+size_t libra_serialize_size(libra_ctx_t *ctx)
+{
+    if (!ctx || !ctx->core || !ctx->game_loaded)
+        return 0;
+    if (!ctx->core->retro_serialize_size)
+        return 0;
+    return ctx->core->retro_serialize_size();
+}
+
+bool libra_serialize(libra_ctx_t *ctx, void *data, size_t size)
+{
+    if (!ctx || !ctx->core || !ctx->game_loaded || !data || size == 0)
+        return false;
+    if (!ctx->core->retro_serialize)
+        return false;
+    return ctx->core->retro_serialize(data, size);
+}
+
+bool libra_unserialize(libra_ctx_t *ctx, const void *data, size_t size)
+{
+    if (!ctx || !ctx->core || !ctx->game_loaded || !data || size == 0)
+        return false;
+    if (!ctx->core->retro_unserialize)
+        return false;
+    return ctx->core->retro_unserialize(data, size);
+}
+
+/* -------------------------------------------------------------------------
  * Controller
  * ---------------------------------------------------------------------- */
 

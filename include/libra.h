@@ -90,9 +90,14 @@ const char *libra_option_value(libra_ctx_t *ctx, unsigned index);
  * Returns false if no value list is available for this option. */
 bool        libra_option_cycle(libra_ctx_t *ctx, unsigned index, int direction);
 
-/* Save states */
+/* Save states (file-based) */
 bool libra_save_state(libra_ctx_t *ctx, const char *path);
 bool libra_load_state(libra_ctx_t *ctx, const char *path);
+
+/* Save states (memory-based — for run-ahead / rewind) */
+size_t libra_serialize_size(libra_ctx_t *ctx);
+bool   libra_serialize(libra_ctx_t *ctx, void *data, size_t size);
+bool   libra_unserialize(libra_ctx_t *ctx, const void *data, size_t size);
 
 /* SRAM (battery-backed save RAM) */
 bool libra_save_sram(libra_ctx_t *ctx, const char *path);
