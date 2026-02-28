@@ -804,6 +804,32 @@ bool libra_environment_cb(unsigned cmd, void *data)
             return true;
         }
 
+        /* ---- Directory aliases ------------------------------------------- */
+        /* GET_CONTENT_DIRECTORY (30) is already handled above as
+         * GET_CORE_ASSETS_DIRECTORY — they share the same numeric value. */
+
+        case RETRO_ENVIRONMENT_GET_PLAYLIST_DIRECTORY:
+            *(const char **)data = ctx->save_dir;
+            return true;
+
+        case RETRO_ENVIRONMENT_GET_FILE_BROWSER_START_DIRECTORY:
+            *(const char **)data = ctx->game_dir ? ctx->game_dir : ctx->save_dir;
+            return true;
+
+        /* ---- Unavailable hardware interfaces ----------------------------- */
+
+        case RETRO_ENVIRONMENT_GET_SENSOR_INTERFACE:
+        case RETRO_ENVIRONMENT_GET_CAMERA_INTERFACE:
+        case RETRO_ENVIRONMENT_GET_LOCATION_INTERFACE:
+        case RETRO_ENVIRONMENT_GET_MIDI_INTERFACE:
+        case RETRO_ENVIRONMENT_GET_MICROPHONE_INTERFACE:
+            return false;
+
+        /* ---- Unsupported extension mechanism ------------------------------ */
+
+        case RETRO_ENVIRONMENT_SET_PROC_ADDRESS_CALLBACK:
+            return false;
+
         default:
             return false;
     }
