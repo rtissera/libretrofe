@@ -78,8 +78,9 @@ libra_ctx_t *libra_create(const libra_config_t *config)
     if (!ctx)
         return NULL;
 
-    ctx->config       = *config;
-    ctx->pixel_format = RETRO_PIXEL_FORMAT_0RGB1555; /* default */
+    ctx->config             = *config;
+    ctx->pixel_format       = RETRO_PIXEL_FORMAT_0RGB1555; /* default */
+    ctx->audio_video_enable = 3; /* both video and audio enabled */
 
     return ctx;
 }
@@ -98,6 +99,7 @@ void libra_destroy(libra_ctx_t *ctx)
         free(ctx->opt_keys[i]);
         free(ctx->opt_vals[i]);
         free(ctx->opt_val_list[i]);
+        free(ctx->opt_desc[i]);
     }
     libra_audio_destroy(ctx->audio);
     free(ctx->game_full_path);
@@ -105,6 +107,12 @@ void libra_destroy(libra_ctx_t *ctx)
     free(ctx->game_name);
     free(ctx->game_ext);
     free(ctx->sw_framebuffer);
+    free(ctx->username);
+    for (unsigned i = 0; i < ctx->input_desc_count; i++)
+        free(ctx->input_descs[i].desc);
+    for (unsigned p = 0; p < LIBRA_MAX_PORTS; p++)
+        for (unsigned t = 0; t < ctx->ctrl_type_count[p]; t++)
+            free(ctx->ctrl_types[p][t].desc);
     if (s_active == ctx)
         s_active = NULL;
     free(ctx);
@@ -284,6 +292,11 @@ bool libra_load_game(libra_ctx_t *ctx, const char *path)
     ctx->game_info_ext.persistent_data = false;
 
     ctx->game_loaded = true;
+
+    /* Enable async audio callback if core registered one */
+    if (ctx->audio_set_state_cb)
+        ctx->audio_set_state_cb(true);
+
     return true;
 }
 
@@ -291,6 +304,10 @@ void libra_unload_game(libra_ctx_t *ctx)
 {
     if (!ctx || !ctx->core || !ctx->game_loaded)
         return;
+
+    /* Disable async audio callback before unloading */
+    if (ctx->audio_set_state_cb)
+        ctx->audio_set_state_cb(false);
 
     s_active = ctx;
     libra_environment_set_ctx(ctx);
@@ -343,6 +360,10 @@ void libra_run(libra_ctx_t *ctx)
     }
 
     ctx->core->retro_run();
+
+    /* Call async audio callback if core registered one (DOSBox, ScummVM) */
+    if (ctx->audio_cb && (ctx->audio_video_enable & 2))
+        ctx->audio_cb();
 
     /* Flush resampled audio to host */
     if (ctx->audio && ctx->config.audio) {
@@ -428,8 +449,12 @@ void libra_set_option(libra_ctx_t *ctx, const char *key, const char *value)
     }
     /* Key not found: insert new */
     if (ctx->opt_count < LIBRA_MAX_OPTIONS) {
-        ctx->opt_keys[ctx->opt_count] = strdup(key);
-        ctx->opt_vals[ctx->opt_count] = strdup(value);
+        unsigned idx = ctx->opt_count;
+        ctx->opt_keys[idx] = strdup(key);
+        ctx->opt_vals[idx] = strdup(value);
+        ctx->opt_val_list[idx] = NULL;
+        ctx->opt_desc[idx] = NULL;
+        ctx->opt_visible[idx] = true;
         ctx->opt_count++;
         ctx->opt_updated = true;
     }
@@ -1045,4 +1070,79 @@ unsigned libra_get_audio_occupancy(libra_ctx_t *ctx)
     if (count == 0)
         return 0;
     return (count * 100) / LIBRA_RING_FRAMES;
+}
+
+void libra_set_audio_video_enable(libra_ctx_t *ctx, int flags)
+{
+    if (ctx)
+        ctx->audio_video_enable = flags;
+}
+
+void libra_set_username(libra_ctx_t *ctx, const char *name)
+{
+    if (!ctx) return;
+    free(ctx->username);
+    ctx->username = name ? strdup(name) : NULL;
+}
+
+void libra_set_language(libra_ctx_t *ctx, unsigned lang)
+{
+    if (ctx)
+        ctx->language = lang;
+}
+
+const char *libra_option_desc(libra_ctx_t *ctx, unsigned index)
+{
+    if (!ctx || index >= ctx->opt_count)
+        return NULL;
+    return ctx->opt_desc[index];
+}
+
+unsigned libra_input_descriptor_count(libra_ctx_t *ctx)
+{
+    return ctx ? ctx->input_desc_count : 0;
+}
+
+const char *libra_input_descriptor(libra_ctx_t *ctx, unsigned i,
+                                    unsigned *port, unsigned *device,
+                                    unsigned *index, unsigned *id)
+{
+    if (!ctx || i >= ctx->input_desc_count)
+        return NULL;
+    if (port)   *port   = ctx->input_descs[i].port;
+    if (device) *device = ctx->input_descs[i].device;
+    if (index)  *index  = ctx->input_descs[i].index;
+    if (id)     *id     = ctx->input_descs[i].id;
+    return ctx->input_descs[i].desc;
+}
+
+unsigned libra_controller_type_count(libra_ctx_t *ctx, unsigned port)
+{
+    if (!ctx || port >= LIBRA_MAX_PORTS)
+        return 0;
+    return ctx->ctrl_type_count[port];
+}
+
+const char *libra_controller_type(libra_ctx_t *ctx, unsigned port,
+                                   unsigned i, unsigned *device_id)
+{
+    if (!ctx || port >= LIBRA_MAX_PORTS || i >= ctx->ctrl_type_count[port])
+        return NULL;
+    if (device_id) *device_id = ctx->ctrl_types[port][i].id;
+    return ctx->ctrl_types[port][i].desc;
+}
+
+bool libra_geometry_changed(libra_ctx_t *ctx)
+{
+    if (!ctx) return false;
+    bool changed = ctx->geometry_changed;
+    ctx->geometry_changed = false;
+    return changed;
+}
+
+bool libra_core_needs_fullpath(libra_ctx_t *ctx)
+{
+    if (!ctx || !ctx->core)
+        return false;
+    return ctx->core->sys_info.need_fullpath;
 }

@@ -186,6 +186,39 @@ unsigned libra_get_min_audio_latency(libra_ctx_t *ctx);
 /* Get audio buffer occupancy percentage (0-100) */
 unsigned libra_get_audio_occupancy(libra_ctx_t *ctx);
 
+/* Audio/video enable flags (bitmask: bit0=video, bit1=audio; default 3=both).
+ * Use 1 (video only) or 2 (audio only) during run-ahead frames. */
+void libra_set_audio_video_enable(libra_ctx_t *ctx, int flags);
+
+/* Username reported to core via GET_USERNAME (NULL = anonymous) */
+void libra_set_username(libra_ctx_t *ctx, const char *name);
+
+/* Language reported to core (RETRO_LANGUAGE_* values, default 0 = English) */
+void libra_set_language(libra_ctx_t *ctx, unsigned lang);
+
+/* Option description text (human-readable label from core definition) */
+const char *libra_option_desc(libra_ctx_t *ctx, unsigned index);
+
+/* Input descriptors (core-declared button names).
+ * Returns the description string, or NULL if index is out of range.
+ * Optionally writes port/device/index/id through the pointers. */
+unsigned    libra_input_descriptor_count(libra_ctx_t *ctx);
+const char *libra_input_descriptor(libra_ctx_t *ctx, unsigned i,
+                unsigned *port, unsigned *device, unsigned *index, unsigned *id);
+
+/* Controller info per port (core-declared supported device types).
+ * Returns the description string, or NULL. Writes device_id if non-NULL. */
+unsigned    libra_controller_type_count(libra_ctx_t *ctx, unsigned port);
+const char *libra_controller_type(libra_ctx_t *ctx, unsigned port,
+                unsigned i, unsigned *device_id);
+
+/* Returns true (and clears flag) if core changed geometry via SET_GEOMETRY
+ * or SET_SYSTEM_AV_INFO since the last call. Use for live aspect updates. */
+bool libra_geometry_changed(libra_ctx_t *ctx);
+
+/* Returns true if the core requires a full filesystem path (not data blob) */
+bool libra_core_needs_fullpath(libra_ctx_t *ctx);
+
 #ifdef __cplusplus
 }
 #endif

@@ -26,7 +26,8 @@ void libra_environment_set_ctx(libra_ctx_t *ctx)
  * val_list is a "|"-joined string of possible values (may be NULL).
  * Marks the option as visible by default. */
 static void insert_option(libra_ctx_t *ctx, const char *key,
-                           const char *default_value, const char *val_list)
+                           const char *default_value, const char *val_list,
+                           const char *desc)
 {
     if (!key)
         return;
@@ -41,6 +42,7 @@ static void insert_option(libra_ctx_t *ctx, const char *key,
     ctx->opt_keys[idx]     = strdup(key);
     ctx->opt_vals[idx]     = strdup(default_value ? default_value : "");
     ctx->opt_val_list[idx] = val_list ? strdup(val_list) : NULL;
+    ctx->opt_desc[idx]     = desc ? strdup(desc) : NULL;
     ctx->opt_visible[idx]  = true;
     ctx->opt_count++;
 }
@@ -178,6 +180,7 @@ bool libra_environment_cb(unsigned cmd, void *data)
                 const struct retro_game_geometry *g =
                     (const struct retro_game_geometry *)data;
                 ctx->core->av_info.geometry = *g;
+                ctx->geometry_changed = true;
             }
             return true;
 
@@ -186,13 +189,14 @@ bool libra_environment_cb(unsigned cmd, void *data)
                 const struct retro_system_av_info *av =
                     (const struct retro_system_av_info *)data;
                 ctx->core->av_info = *av;
+                ctx->geometry_changed = true;
                 if (ctx->audio)
                     libra_audio_set_src_rate(ctx->audio, av->timing.sample_rate);
             }
             return true;
 
         case RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE:
-            if (data) *(int *)data = 3;
+            if (data) *(int *)data = ctx->audio_video_enable;
             return true;
 
         /* ---- Directories / identity -------------------------------------- */
@@ -214,11 +218,11 @@ bool libra_environment_cb(unsigned cmd, void *data)
             return true;
 
         case RETRO_ENVIRONMENT_GET_USERNAME:
-            *(const char **)data = NULL;
+            *(const char **)data = ctx->username;
             return true;
 
         case RETRO_ENVIRONMENT_GET_LANGUAGE:
-            if (data) *(unsigned *)data = RETRO_LANGUAGE_ENGLISH;
+            if (data) *(unsigned *)data = ctx->language;
             return true;
 
         case RETRO_ENVIRONMENT_GET_FASTFORWARDING:
@@ -269,11 +273,56 @@ bool libra_environment_cb(unsigned cmd, void *data)
 
         /* ---- Input -------------------------------------------------------- */
 
-        case RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS:
-            return true;
+        case RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS: {
+            /* Free previous descriptors */
+            for (unsigned i = 0; i < ctx->input_desc_count; i++)
+                free(ctx->input_descs[i].desc);
+            ctx->input_desc_count = 0;
 
-        case RETRO_ENVIRONMENT_SET_CONTROLLER_INFO:
+            const struct retro_input_descriptor *d =
+                (const struct retro_input_descriptor *)data;
+            if (d) {
+                for (; d->description != NULL &&
+                       ctx->input_desc_count < LIBRA_MAX_INPUT_DESCS; d++) {
+                    unsigned idx = ctx->input_desc_count;
+                    ctx->input_descs[idx].port   = d->port;
+                    ctx->input_descs[idx].device  = d->device;
+                    ctx->input_descs[idx].index   = d->index;
+                    ctx->input_descs[idx].id      = d->id;
+                    ctx->input_descs[idx].desc    = strdup(d->description);
+                    ctx->input_desc_count++;
+                }
+            }
             return true;
+        }
+
+        case RETRO_ENVIRONMENT_SET_CONTROLLER_INFO: {
+            /* Free previous controller types */
+            for (unsigned p = 0; p < LIBRA_MAX_PORTS; p++) {
+                for (unsigned t = 0; t < ctx->ctrl_type_count[p]; t++)
+                    free(ctx->ctrl_types[p][t].desc);
+                ctx->ctrl_type_count[p] = 0;
+            }
+
+            const struct retro_controller_info *info =
+                (const struct retro_controller_info *)data;
+            if (info) {
+                for (unsigned p = 0;
+                     p < LIBRA_MAX_PORTS && info[p].types != NULL;
+                     p++) {
+                    unsigned n = info[p].num_types;
+                    if (n > LIBRA_MAX_CTRL_TYPES) n = LIBRA_MAX_CTRL_TYPES;
+                    for (unsigned t = 0; t < n; t++) {
+                        ctx->ctrl_types[p][t].id   = info[p].types[t].id;
+                        ctx->ctrl_types[p][t].desc  =
+                            info[p].types[t].desc
+                                ? strdup(info[p].types[t].desc) : NULL;
+                    }
+                    ctx->ctrl_type_count[p] = n;
+                }
+            }
+            return true;
+        }
 
         /* ---- Rumble ------------------------------------------------------- */
 
@@ -417,8 +466,17 @@ bool libra_environment_cb(unsigned cmd, void *data)
             for (; vars->key != NULL; vars++) {
                 const char *def      = "";
                 const char *val_list = NULL;
+                char desc_buf[256] = "";
                 const char *semi = vars->value ? strchr(vars->value, ';') : NULL;
                 if (semi) {
+                    /* Extract description (text before semicolon) */
+                    size_t dlen = (size_t)(semi - vars->value);
+                    if (dlen >= sizeof(desc_buf)) dlen = sizeof(desc_buf) - 1;
+                    memcpy(desc_buf, vars->value, dlen);
+                    desc_buf[dlen] = '\0';
+                    while (dlen > 0 && desc_buf[dlen-1] == ' ')
+                        desc_buf[--dlen] = '\0';
+
                     const char *vals = semi + 1;
                     while (*vals == ' ') vals++;
                     val_list = vals; /* "|"-joined list already */
@@ -434,7 +492,8 @@ bool libra_environment_cb(unsigned cmd, void *data)
                         def = vals;
                     }
                 }
-                insert_option(ctx, vars->key, def, val_list);
+                insert_option(ctx, vars->key, def, val_list,
+                              desc_buf[0] ? desc_buf : NULL);
             }
             return true;
         }
@@ -445,7 +504,8 @@ bool libra_environment_cb(unsigned cmd, void *data)
             if (!defs) return true;
             for (; defs->key != NULL; defs++) {
                 char *vl = build_val_list(defs->values);
-                insert_option(ctx, defs->key, defs->default_value, vl);
+                insert_option(ctx, defs->key, defs->default_value, vl,
+                              defs->desc);
                 free(vl);
             }
             return true;
@@ -458,7 +518,7 @@ bool libra_environment_cb(unsigned cmd, void *data)
             for (const struct retro_core_option_definition *d = intl->us;
                  d->key != NULL; d++) {
                 char *vl = build_val_list(d->values);
-                insert_option(ctx, d->key, d->default_value, vl);
+                insert_option(ctx, d->key, d->default_value, vl, d->desc);
                 free(vl);
             }
             return true;
@@ -471,7 +531,7 @@ bool libra_environment_cb(unsigned cmd, void *data)
             for (const struct retro_core_option_v2_definition *d = opts->definitions;
                  d->key != NULL; d++) {
                 char *vl = build_val_list(d->values);
-                insert_option(ctx, d->key, d->default_value, vl);
+                insert_option(ctx, d->key, d->default_value, vl, d->desc);
                 free(vl);
             }
             return true;
@@ -484,7 +544,7 @@ bool libra_environment_cb(unsigned cmd, void *data)
             for (const struct retro_core_option_v2_definition *d =
                      intl->us->definitions; d->key != NULL; d++) {
                 char *vl = build_val_list(d->values);
-                insert_option(ctx, d->key, d->default_value, vl);
+                insert_option(ctx, d->key, d->default_value, vl, d->desc);
                 free(vl);
             }
             return true;
@@ -703,7 +763,20 @@ bool libra_environment_cb(unsigned cmd, void *data)
                     ? ctx->config.audio_output_rate : 48000;
             return true;
 
-        /* ---- Identity / locale ------------------------------------------- */
+        /* ---- Audio callback (async audio cores) -------------------------- */
+
+        case RETRO_ENVIRONMENT_SET_AUDIO_CALLBACK: {
+            const struct retro_audio_callback *cb =
+                (const struct retro_audio_callback *)data;
+            if (cb) {
+                ctx->audio_cb           = cb->callback;
+                ctx->audio_set_state_cb = cb->set_state;
+            } else {
+                ctx->audio_cb           = NULL;
+                ctx->audio_set_state_cb = NULL;
+            }
+            return true;
+        }
 
         default:
             return false;

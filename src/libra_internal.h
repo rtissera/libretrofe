@@ -9,6 +9,8 @@
 
 #define LIBRA_MAX_OPTIONS 256
 #define LIBRA_MAX_PORTS   8
+#define LIBRA_MAX_INPUT_DESCS 256
+#define LIBRA_MAX_CTRL_TYPES  16
 
 struct libra_ctx {
     libra_config_t  config;
@@ -111,6 +113,39 @@ struct libra_ctx {
     /* Software framebuffer for GET_CURRENT_SOFTWARE_FRAMEBUFFER */
     void           *sw_framebuffer;
     size_t          sw_framebuffer_size;
+
+    /* Audio callback (for async audio cores like DOSBox, ScummVM) */
+    retro_audio_callback_t           audio_cb;
+    retro_audio_set_state_callback_t audio_set_state_cb;
+
+    /* Input descriptors (deep-copied from core) */
+    struct {
+        unsigned port, device, index, id;
+        char *desc;
+    } input_descs[LIBRA_MAX_INPUT_DESCS];
+    unsigned input_desc_count;
+
+    /* Controller info per port (deep-copied from core) */
+    struct {
+        char *desc;
+        unsigned id;
+    } ctrl_types[LIBRA_MAX_PORTS][LIBRA_MAX_CTRL_TYPES];
+    unsigned ctrl_type_count[LIBRA_MAX_PORTS];
+
+    /* Audio/video enable flags for run-ahead (default 3 = both) */
+    int audio_video_enable;
+
+    /* Username (host-set, for GET_USERNAME) */
+    char *username;
+
+    /* Language (for GET_LANGUAGE, default 0 = RETRO_LANGUAGE_ENGLISH) */
+    unsigned language;
+
+    /* Option descriptions (parallel to opt_keys/opt_vals) */
+    char *opt_desc[LIBRA_MAX_OPTIONS];
+
+    /* Geometry change flag (set by SET_GEOMETRY / SET_SYSTEM_AV_INFO) */
+    bool geometry_changed;
 };
 
 #endif /* LIBRA_INTERNAL_H */
