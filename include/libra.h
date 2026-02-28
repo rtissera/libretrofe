@@ -219,6 +219,14 @@ bool libra_geometry_changed(libra_ctx_t *ctx);
 /* Returns true if the core requires a full filesystem path (not data blob) */
 bool libra_core_needs_fullpath(libra_ctx_t *ctx);
 
+/* Option category (v2): returns category_key for the option at index, or NULL */
+const char *libra_option_category(libra_ctx_t *ctx, unsigned index);
+
+/* Category definitions (populated from SET_CORE_OPTIONS_V2) */
+unsigned    libra_category_count(libra_ctx_t *ctx);
+const char *libra_category_key (libra_ctx_t *ctx, unsigned index);
+const char *libra_category_desc(libra_ctx_t *ctx, unsigned index);
+
 #ifdef __cplusplus
 }
 #endif

@@ -144,6 +144,17 @@ struct libra_ctx {
     /* Option descriptions (parallel to opt_keys/opt_vals) */
     char *opt_desc[LIBRA_MAX_OPTIONS];
 
+    /* Option category keys (parallel to opt_keys, v2 only; NULL if no category) */
+    char *opt_category[LIBRA_MAX_OPTIONS];
+
+    /* Core option category definitions (v2) */
+#define LIBRA_MAX_CATEGORIES 32
+    struct {
+        char *key;
+        char *desc;
+    } categories[LIBRA_MAX_CATEGORIES];
+    unsigned category_count;
+
     /* Geometry change flag (set by SET_GEOMETRY / SET_SYSTEM_AV_INFO) */
     bool geometry_changed;
 };

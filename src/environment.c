@@ -27,7 +27,7 @@ void libra_environment_set_ctx(libra_ctx_t *ctx)
  * Marks the option as visible by default. */
 static void insert_option(libra_ctx_t *ctx, const char *key,
                            const char *default_value, const char *val_list,
-                           const char *desc)
+                           const char *desc, const char *category_key)
 {
     if (!key)
         return;
@@ -43,6 +43,7 @@ static void insert_option(libra_ctx_t *ctx, const char *key,
     ctx->opt_vals[idx]     = strdup(default_value ? default_value : "");
     ctx->opt_val_list[idx] = val_list ? strdup(val_list) : NULL;
     ctx->opt_desc[idx]     = desc ? strdup(desc) : NULL;
+    ctx->opt_category[idx] = category_key ? strdup(category_key) : NULL;
     ctx->opt_visible[idx]  = true;
     ctx->opt_count++;
 }
@@ -67,6 +68,27 @@ static char *build_val_list(const struct retro_core_option_value *values)
     }
     buf[pos] = '\0';
     return pos > 0 ? strdup(buf) : NULL;
+}
+
+/* Parse v2 category definitions into the context */
+static void parse_v2_categories(libra_ctx_t *ctx,
+                                  const struct retro_core_option_v2_category *cats)
+{
+    /* Free previous categories */
+    for (unsigned i = 0; i < ctx->category_count; i++) {
+        free(ctx->categories[i].key);
+        free(ctx->categories[i].desc);
+    }
+    ctx->category_count = 0;
+
+    if (!cats) return;
+    for (const struct retro_core_option_v2_category *c = cats;
+         c->key != NULL && ctx->category_count < LIBRA_MAX_CATEGORIES; c++) {
+        unsigned idx = ctx->category_count;
+        ctx->categories[idx].key  = strdup(c->key);
+        ctx->categories[idx].desc = c->desc ? strdup(c->desc) : NULL;
+        ctx->category_count++;
+    }
 }
 
 /* Log callback forwarded to stderr */
@@ -493,7 +515,7 @@ bool libra_environment_cb(unsigned cmd, void *data)
                     }
                 }
                 insert_option(ctx, vars->key, def, val_list,
-                              desc_buf[0] ? desc_buf : NULL);
+                              desc_buf[0] ? desc_buf : NULL, NULL);
             }
             return true;
         }
@@ -505,7 +527,7 @@ bool libra_environment_cb(unsigned cmd, void *data)
             for (; defs->key != NULL; defs++) {
                 char *vl = build_val_list(defs->values);
                 insert_option(ctx, defs->key, defs->default_value, vl,
-                              defs->desc);
+                              defs->desc, NULL);
                 free(vl);
             }
             return true;
@@ -518,7 +540,7 @@ bool libra_environment_cb(unsigned cmd, void *data)
             for (const struct retro_core_option_definition *d = intl->us;
                  d->key != NULL; d++) {
                 char *vl = build_val_list(d->values);
-                insert_option(ctx, d->key, d->default_value, vl, d->desc);
+                insert_option(ctx, d->key, d->default_value, vl, d->desc, NULL);
                 free(vl);
             }
             return true;
@@ -528,10 +550,12 @@ bool libra_environment_cb(unsigned cmd, void *data)
             const struct retro_core_options_v2 *opts =
                 (const struct retro_core_options_v2 *)data;
             if (!opts || !opts->definitions) return true;
+            parse_v2_categories(ctx, opts->categories);
             for (const struct retro_core_option_v2_definition *d = opts->definitions;
                  d->key != NULL; d++) {
                 char *vl = build_val_list(d->values);
-                insert_option(ctx, d->key, d->default_value, vl, d->desc);
+                insert_option(ctx, d->key, d->default_value, vl, d->desc,
+                              d->category_key);
                 free(vl);
             }
             return true;
@@ -541,10 +565,12 @@ bool libra_environment_cb(unsigned cmd, void *data)
             const struct retro_core_options_v2_intl *intl =
                 (const struct retro_core_options_v2_intl *)data;
             if (!intl || !intl->us || !intl->us->definitions) return true;
+            parse_v2_categories(ctx, intl->us->categories);
             for (const struct retro_core_option_v2_definition *d =
                      intl->us->definitions; d->key != NULL; d++) {
                 char *vl = build_val_list(d->values);
-                insert_option(ctx, d->key, d->default_value, vl, d->desc);
+                insert_option(ctx, d->key, d->default_value, vl, d->desc,
+                              d->category_key);
                 free(vl);
             }
             return true;

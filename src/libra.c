@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <strings.h>
 #include <time.h>
 #include <zlib.h>
 
@@ -100,6 +101,11 @@ void libra_destroy(libra_ctx_t *ctx)
         free(ctx->opt_vals[i]);
         free(ctx->opt_val_list[i]);
         free(ctx->opt_desc[i]);
+        free(ctx->opt_category[i]);
+    }
+    for (unsigned i = 0; i < ctx->category_count; i++) {
+        free(ctx->categories[i].key);
+        free(ctx->categories[i].desc);
     }
     libra_audio_destroy(ctx->audio);
     free(ctx->game_full_path);
@@ -206,9 +212,32 @@ bool libra_load_game(libra_ctx_t *ctx, const char *path)
     struct retro_game_info game = { 0 };
     game.path = path;
 
-    /* If the core needs full path, we just pass it without data.
-     * Cores that need the data buffer set need_fullpath = false. */
-    if (!ctx->core->sys_info.need_fullpath && path) {
+    /* Determine need_fullpath: check content_info_override first (per-ext),
+     * then fall back to the core's global sys_info.need_fullpath. */
+    bool need_fullpath = ctx->core->sys_info.need_fullpath;
+    if (path && ctx->content_info_override) {
+        const char *dot = strrchr(path, '.');
+        if (dot) {
+            const char *ext = dot + 1;
+            for (const struct retro_system_content_info_override *ov =
+                     ctx->content_info_override; ov->extensions; ov++) {
+                /* Check "|"-delimited extension list */
+                const char *p = ov->extensions;
+                while (*p) {
+                    const char *sep = strchr(p, '|');
+                    size_t len = sep ? (size_t)(sep - p) : strlen(p);
+                    if (strlen(ext) == len && strncasecmp(ext, p, len) == 0) {
+                        need_fullpath = ov->need_fullpath;
+                        goto override_done;
+                    }
+                    p += len + (sep ? 1 : 0);
+                }
+            }
+        }
+    }
+override_done:
+
+    if (!need_fullpath && path) {
         FILE *f = fopen(path, "rb");
         if (f) {
             fseek(f, 0, SEEK_END);
@@ -454,6 +483,7 @@ void libra_set_option(libra_ctx_t *ctx, const char *key, const char *value)
         ctx->opt_vals[idx] = strdup(value);
         ctx->opt_val_list[idx] = NULL;
         ctx->opt_desc[idx] = NULL;
+        ctx->opt_category[idx] = NULL;
         ctx->opt_visible[idx] = true;
         ctx->opt_count++;
         ctx->opt_updated = true;
@@ -1145,4 +1175,34 @@ bool libra_core_needs_fullpath(libra_ctx_t *ctx)
     if (!ctx || !ctx->core)
         return false;
     return ctx->core->sys_info.need_fullpath;
+}
+
+/* -------------------------------------------------------------------------
+ * Option categories (v2)
+ * ---------------------------------------------------------------------- */
+
+const char *libra_option_category(libra_ctx_t *ctx, unsigned index)
+{
+    if (!ctx || index >= ctx->opt_count)
+        return NULL;
+    return ctx->opt_category[index];
+}
+
+unsigned libra_category_count(libra_ctx_t *ctx)
+{
+    return ctx ? ctx->category_count : 0;
+}
+
+const char *libra_category_key(libra_ctx_t *ctx, unsigned index)
+{
+    if (!ctx || index >= ctx->category_count)
+        return NULL;
+    return ctx->categories[index].key;
+}
+
+const char *libra_category_desc(libra_ctx_t *ctx, unsigned index)
+{
+    if (!ctx || index >= ctx->category_count)
+        return NULL;
+    return ctx->categories[index].desc;
 }
