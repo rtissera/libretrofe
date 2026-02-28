@@ -166,6 +166,26 @@ bool libra_update_option_visibility(libra_ctx_t *ctx);
  * Calling this clears the pending flag. *frames receives display duration. */
 const char *libra_poll_message(libra_ctx_t *ctx, unsigned *frames);
 
+/* Throttle mode constants (mirrors RETRO_THROTTLE_* for host convenience) */
+#define LIBRA_THROTTLE_NONE           0
+#define LIBRA_THROTTLE_FRAME_STEPPING 1
+#define LIBRA_THROTTLE_FAST_FORWARD   2
+#define LIBRA_THROTTLE_SLOW_MOTION    3
+#define LIBRA_THROTTLE_REWINDING      4
+
+/* Set throttle state reported to core via GET_THROTTLE_STATE */
+void libra_set_throttle_state(libra_ctx_t *ctx, unsigned mode, float rate);
+
+/* Check if core requested fastforwarding override via SET_FASTFORWARDING_OVERRIDE.
+ * Returns true if an override is active. *fastforward receives requested state. */
+bool libra_get_ff_override(libra_ctx_t *ctx, bool *fastforward);
+
+/* Get minimum audio latency requested by core (ms), or 0 if not set */
+unsigned libra_get_min_audio_latency(libra_ctx_t *ctx);
+
+/* Get audio buffer occupancy percentage (0-100) */
+unsigned libra_get_audio_occupancy(libra_ctx_t *ctx);
+
 #ifdef __cplusplus
 }
 #endif

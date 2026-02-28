@@ -7,7 +7,7 @@
 #include "audio.h"
 #include "libretro.h"
 
-#define LIBRA_MAX_OPTIONS 128
+#define LIBRA_MAX_OPTIONS 256
 #define LIBRA_MAX_PORTS   8
 
 struct libra_ctx {
@@ -80,6 +80,37 @@ struct libra_ctx {
     char            message_buf[512];
     unsigned        message_frames;
     bool            message_pending;
+
+    /* Audio buffer status callback (core polls buffer occupancy) */
+    retro_audio_buffer_status_callback_t audio_buffer_status_cb;
+
+    /* Minimum audio latency requested by core (ms) */
+    unsigned        min_audio_latency;
+
+    /* Fastforwarding override from core */
+    bool            ff_override_active;
+    float           ff_override_ratio;
+    bool            ff_override_fastforward;
+    bool            ff_override_notification;
+    bool            ff_override_inhibit;
+
+    /* Content info override from core (pointer owned by core) */
+    const struct retro_system_content_info_override *content_info_override;
+
+    /* GET_GAME_INFO_EXT data (built at game load) */
+    char           *game_full_path;
+    char           *game_dir;
+    char           *game_name;    /* basename without extension */
+    char           *game_ext;     /* extension, lowercase */
+    struct retro_game_info_ext game_info_ext;
+
+    /* Throttle state for GET_THROTTLE_STATE */
+    unsigned        throttle_mode;
+    float           throttle_rate;
+
+    /* Software framebuffer for GET_CURRENT_SOFTWARE_FRAMEBUFFER */
+    void           *sw_framebuffer;
+    size_t          sw_framebuffer_size;
 };
 
 #endif /* LIBRA_INTERNAL_H */

@@ -10,7 +10,7 @@
 #include <time.h>
 #include <sys/time.h>
 
-/* Thread-local context pointer set before retro_run() and init calls */
+/* File-scoped context pointer set before retro_run() and init calls */
 static libra_ctx_t *s_ctx = NULL;
 
 void libra_environment_set_ctx(libra_ctx_t *ctx)
@@ -594,6 +594,114 @@ bool libra_environment_cb(unsigned cmd, void *data)
             }
             return true;
         }
+
+        /* ---- Audio buffer / latency -------------------------------------- */
+
+        case RETRO_ENVIRONMENT_SET_AUDIO_BUFFER_STATUS_CALLBACK: {
+            const struct retro_audio_buffer_status_callback *cb =
+                (const struct retro_audio_buffer_status_callback *)data;
+            ctx->audio_buffer_status_cb = cb ? cb->callback : NULL;
+            return true;
+        }
+
+        case RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY:
+            if (data) ctx->min_audio_latency = *(const unsigned *)data;
+            return true;
+
+        /* ---- Fastforwarding override ------------------------------------- */
+
+        case RETRO_ENVIRONMENT_SET_FASTFORWARDING_OVERRIDE: {
+            const struct retro_fastforwarding_override *ffo =
+                (const struct retro_fastforwarding_override *)data;
+            if (ffo) {
+                ctx->ff_override_active       = true;
+                ctx->ff_override_ratio        = ffo->ratio;
+                ctx->ff_override_fastforward  = ffo->fastforward;
+                ctx->ff_override_notification = ffo->notification;
+                ctx->ff_override_inhibit      = ffo->inhibit_toggle;
+                ctx->fast_forwarding          = ffo->fastforward;
+            }
+            return true;
+        }
+
+        /* ---- Content info override --------------------------------------- */
+
+        case RETRO_ENVIRONMENT_SET_CONTENT_INFO_OVERRIDE:
+            ctx->content_info_override =
+                (const struct retro_system_content_info_override *)data;
+            return true;
+
+        /* ---- Extended game info ------------------------------------------ */
+
+        case RETRO_ENVIRONMENT_GET_GAME_INFO_EXT:
+            if (data && ctx->game_full_path) {
+                *(const struct retro_game_info_ext **)data = &ctx->game_info_ext;
+                return true;
+            }
+            return false;
+
+        /* ---- Throttle state ---------------------------------------------- */
+
+        case RETRO_ENVIRONMENT_GET_THROTTLE_STATE: {
+            struct retro_throttle_state *ts =
+                (struct retro_throttle_state *)data;
+            if (ts) {
+                ts->mode = ctx->throttle_mode;
+                ts->rate = ctx->throttle_rate;
+            }
+            return true;
+        }
+
+        /* ---- Device power ------------------------------------------------ */
+
+        case RETRO_ENVIRONMENT_GET_DEVICE_POWER: {
+            struct retro_device_power *pw =
+                (struct retro_device_power *)data;
+            if (pw) {
+                pw->state   = RETRO_POWERSTATE_PLUGGED_IN;
+                pw->seconds = RETRO_POWERSTATE_NO_ESTIMATE;
+                pw->percent = 100;
+            }
+            return true;
+        }
+
+        /* ---- Software framebuffer ---------------------------------------- */
+
+        case RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER: {
+            struct retro_framebuffer *fb =
+                (struct retro_framebuffer *)data;
+            if (!fb || fb->width == 0 || fb->height == 0)
+                return false;
+
+            /* Determine bytes per pixel from current pixel format */
+            size_t bpp = (ctx->pixel_format == RETRO_PIXEL_FORMAT_XRGB8888) ? 4 : 2;
+            size_t pitch = fb->width * bpp;
+            size_t needed = pitch * fb->height;
+
+            if (needed > ctx->sw_framebuffer_size) {
+                free(ctx->sw_framebuffer);
+                ctx->sw_framebuffer = malloc(needed);
+                if (!ctx->sw_framebuffer) {
+                    ctx->sw_framebuffer_size = 0;
+                    return false;
+                }
+                ctx->sw_framebuffer_size = needed;
+            }
+
+            fb->data         = ctx->sw_framebuffer;
+            fb->pitch        = pitch;
+            fb->format       = (enum retro_pixel_format)ctx->pixel_format;
+            fb->memory_flags = 0;
+            return true;
+        }
+
+        /* ---- Target sample rate ------------------------------------------ */
+
+        case RETRO_ENVIRONMENT_GET_TARGET_SAMPLE_RATE:
+            if (data)
+                *(unsigned *)data = ctx->config.audio_output_rate
+                    ? ctx->config.audio_output_rate : 48000;
+            return true;
 
         /* ---- Identity / locale ------------------------------------------- */
 

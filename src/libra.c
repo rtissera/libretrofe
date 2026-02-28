@@ -100,6 +100,11 @@ void libra_destroy(libra_ctx_t *ctx)
         free(ctx->opt_val_list[i]);
     }
     libra_audio_destroy(ctx->audio);
+    free(ctx->game_full_path);
+    free(ctx->game_dir);
+    free(ctx->game_name);
+    free(ctx->game_ext);
+    free(ctx->sw_framebuffer);
     if (s_active == ctx)
         s_active = NULL;
     free(ctx);
@@ -232,6 +237,52 @@ bool libra_load_game(libra_ctx_t *ctx, const char *path)
         ctx->core->av_info.timing.sample_rate,
         ctx->config.audio_output_rate ? ctx->config.audio_output_rate : 48000);
 
+    /* Build game_info_ext for GET_GAME_INFO_EXT */
+    free(ctx->game_full_path);
+    free(ctx->game_dir);
+    free(ctx->game_name);
+    free(ctx->game_ext);
+    ctx->game_full_path = path ? strdup(path) : NULL;
+    ctx->game_dir  = NULL;
+    ctx->game_name = NULL;
+    ctx->game_ext  = NULL;
+    if (path) {
+        /* Extract directory */
+        const char *slash = strrchr(path, '/');
+        if (slash) {
+            ctx->game_dir = strndup(path, (size_t)(slash - path));
+        } else {
+            ctx->game_dir = strdup(".");
+        }
+        /* Extract name (basename without extension) */
+        const char *base = slash ? slash + 1 : path;
+        const char *dot = strrchr(base, '.');
+        if (dot && dot > base) {
+            ctx->game_name = strndup(base, (size_t)(dot - base));
+            /* Extension (lowercase) */
+            ctx->game_ext = strdup(dot + 1);
+            if (ctx->game_ext) {
+                for (char *c = ctx->game_ext; *c; c++)
+                    *c = (*c >= 'A' && *c <= 'Z') ? (*c + 32) : *c;
+            }
+        } else {
+            ctx->game_name = strdup(base);
+            ctx->game_ext  = strdup("");
+        }
+    }
+    memset(&ctx->game_info_ext, 0, sizeof(ctx->game_info_ext));
+    ctx->game_info_ext.full_path       = ctx->game_full_path;
+    ctx->game_info_ext.archive_path    = NULL;
+    ctx->game_info_ext.archive_file    = NULL;
+    ctx->game_info_ext.dir             = ctx->game_dir;
+    ctx->game_info_ext.name            = ctx->game_name;
+    ctx->game_info_ext.ext             = ctx->game_ext;
+    ctx->game_info_ext.meta            = "";
+    ctx->game_info_ext.data            = NULL; /* not persistent after load */
+    ctx->game_info_ext.size            = game.size;
+    ctx->game_info_ext.file_in_archive = false;
+    ctx->game_info_ext.persistent_data = false;
+
     ctx->game_loaded = true;
     return true;
 }
@@ -278,6 +329,17 @@ void libra_run(libra_ctx_t *ctx)
             delta = ctx->frame_time_reference;
         ctx->frame_time_last = now;
         ctx->frame_time_cb(delta);
+    }
+
+    /* Audio buffer status callback — inform core of buffer occupancy */
+    if (ctx->audio_buffer_status_cb && ctx->audio) {
+        unsigned occupancy = 0;
+        if (ctx->audio->count > 0) {
+            occupancy = (unsigned)(ctx->audio->count * 100 / LIBRA_RING_FRAMES);
+            if (occupancy > 100) occupancy = 100;
+        }
+        bool underrun = (occupancy < 10);
+        ctx->audio_buffer_status_cb(true, occupancy, underrun);
     }
 
     ctx->core->retro_run();
@@ -953,4 +1015,34 @@ const char *libra_poll_message(libra_ctx_t *ctx, unsigned *frames)
     ctx->message_pending = false;
     if (frames) *frames = ctx->message_frames;
     return ctx->message_buf;
+}
+
+void libra_set_throttle_state(libra_ctx_t *ctx, unsigned mode, float rate)
+{
+    if (!ctx) return;
+    ctx->throttle_mode = mode;
+    ctx->throttle_rate = rate;
+}
+
+bool libra_get_ff_override(libra_ctx_t *ctx, bool *fastforward)
+{
+    if (!ctx || !ctx->ff_override_active)
+        return false;
+    if (fastforward) *fastforward = ctx->ff_override_fastforward;
+    return true;
+}
+
+unsigned libra_get_min_audio_latency(libra_ctx_t *ctx)
+{
+    return ctx ? ctx->min_audio_latency : 0;
+}
+
+unsigned libra_get_audio_occupancy(libra_ctx_t *ctx)
+{
+    if (!ctx || !ctx->audio)
+        return 0;
+    unsigned count = ctx->audio->count;
+    if (count == 0)
+        return 0;
+    return (count * 100) / LIBRA_RING_FRAMES;
 }
