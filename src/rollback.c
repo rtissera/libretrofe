@@ -1249,6 +1249,7 @@ bool libra_rb_run(struct libra_rollback *rb)
         struct rb_frame *target = rb_slot(rb, rollback_to);
         if (target->state && target->state_size > 0) {
             rb->is_replay = true;
+            ctx->savestate_context = RETRO_SAVESTATE_CONTEXT_ROLLBACK_NETPLAY;
 
             /* Load state from the rollback point */
             libra_unserialize(ctx, target->state, target->state_size);
@@ -1290,6 +1291,7 @@ bool libra_rb_run(struct libra_rollback *rb)
             ctx->config.video = orig_video;
             ctx->config.audio = orig_audio;
 
+            ctx->savestate_context = RETRO_SAVESTATE_CONTEXT_NORMAL;
             rb->is_replay = false;
         }
     }

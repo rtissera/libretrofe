@@ -392,11 +392,11 @@ bool libra_environment_cb(unsigned cmd, void *data)
             return true;
 
         case RETRO_ENVIRONMENT_GET_USERNAME:
-            *(const char **)data = NULL;
+            *(const char **)data = ctx->username;
             return true;
 
         case RETRO_ENVIRONMENT_GET_LANGUAGE:
-            if (data) *(unsigned *)data = RETRO_LANGUAGE_ENGLISH;
+            if (data) *(unsigned *)data = ctx->language;
             return true;
 
         case RETRO_ENVIRONMENT_GET_FASTFORWARDING:
@@ -607,7 +607,7 @@ bool libra_environment_cb(unsigned cmd, void *data)
             return true;
 
         case RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT:
-            if (data) *(unsigned *)data = 0; /* RETRO_SAVESTATE_CONTEXT_NORMAL */
+            if (data) *(unsigned *)data = ctx->savestate_context;
             return true;
 
         case RETRO_ENVIRONMENT_GET_THROTTLE_STATE: {

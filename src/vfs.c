@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>  /* ftruncate, fileno */
+#include <sys/stat.h>
+#include <dirent.h>
+#include <errno.h>
 
 struct retro_vfs_file_handle {
     FILE *fp;
@@ -140,6 +143,128 @@ static int64_t vfs_truncate(struct retro_vfs_file_handle *stream, int64_t length
     return ftruncate(fileno(stream->fp), (off_t)length) ? -1 : 0;
 }
 
+/* ---- v3 functions -------------------------------------------------------- */
+
+struct retro_vfs_dir_handle {
+    DIR        *dir;
+    char       *path;
+    struct dirent *entry;     /* current entry from readdir() */
+    bool        include_hidden;
+};
+
+static int vfs_stat(const char *path, int32_t *size)
+{
+    if (!path)
+        return 0;
+
+    struct stat st;
+    if (stat(path, &st) != 0)
+        return 0;
+
+    int flags = RETRO_VFS_STAT_IS_VALID;
+    if (S_ISDIR(st.st_mode))
+        flags |= RETRO_VFS_STAT_IS_DIRECTORY;
+    if (S_ISCHR(st.st_mode))
+        flags |= RETRO_VFS_STAT_IS_CHARACTER_SPECIAL;
+
+    if (size)
+        *size = (int32_t)st.st_size;
+
+    return flags;
+}
+
+static int vfs_mkdir(const char *dir)
+{
+    if (!dir)
+        return -1;
+    if (mkdir(dir, 0755) == 0)
+        return 0;
+    if (errno == EEXIST)
+        return -2;
+    return -1;
+}
+
+static struct retro_vfs_dir_handle *vfs_opendir(const char *dir,
+                                                 bool include_hidden)
+{
+    if (!dir)
+        return NULL;
+
+    DIR *d = opendir(dir);
+    if (!d)
+        return NULL;
+
+    struct retro_vfs_dir_handle *h = calloc(1, sizeof(*h));
+    if (!h) { closedir(d); return NULL; }
+
+    h->dir            = d;
+    h->path           = strdup(dir);
+    h->entry          = NULL;
+    h->include_hidden = include_hidden;
+    return h;
+}
+
+static bool vfs_readdir(struct retro_vfs_dir_handle *dirstream)
+{
+    if (!dirstream || !dirstream->dir)
+        return false;
+
+    for (;;) {
+        dirstream->entry = readdir(dirstream->dir);
+        if (!dirstream->entry)
+            return false;
+
+        const char *name = dirstream->entry->d_name;
+
+        /* Always skip . and .. */
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+            continue;
+
+        /* Skip hidden files (starting with '.') unless include_hidden */
+        if (!dirstream->include_hidden && name[0] == '.')
+            continue;
+
+        return true;
+    }
+}
+
+static const char *vfs_dirent_get_name(struct retro_vfs_dir_handle *dirstream)
+{
+    if (!dirstream || !dirstream->entry)
+        return NULL;
+    return dirstream->entry->d_name;
+}
+
+static bool vfs_dirent_is_dir(struct retro_vfs_dir_handle *dirstream)
+{
+    if (!dirstream || !dirstream->entry)
+        return false;
+
+#ifdef _DIRENT_HAVE_D_TYPE
+    if (dirstream->entry->d_type != DT_UNKNOWN)
+        return dirstream->entry->d_type == DT_DIR;
+#endif
+
+    /* Fallback: stat the entry */
+    char full[4096];
+    snprintf(full, sizeof(full), "%s/%s", dirstream->path,
+             dirstream->entry->d_name);
+    struct stat st;
+    if (stat(full, &st) != 0)
+        return false;
+    return S_ISDIR(st.st_mode);
+}
+
+static int vfs_closedir(struct retro_vfs_dir_handle *dirstream)
+{
+    if (!dirstream)
+        return -1;
+    int r = closedir(dirstream->dir);
+    free(dirstream->path);
+    free(dirstream);
+    return r ? -1 : 0;
+}
+
 /* ---- Interface table ----------------------------------------------------- */
 
 static struct retro_vfs_interface s_vfs = {
@@ -157,7 +282,14 @@ static struct retro_vfs_interface s_vfs = {
     .rename    = vfs_rename,
     /* v2 */
     .truncate  = vfs_truncate,
-    /* v3 fields left NULL — not advertised */
+    /* v3 */
+    .stat           = vfs_stat,
+    .mkdir          = vfs_mkdir,
+    .opendir        = vfs_opendir,
+    .readdir        = vfs_readdir,
+    .dirent_get_name = vfs_dirent_get_name,
+    .dirent_is_dir  = vfs_dirent_is_dir,
+    .closedir       = vfs_closedir,
 };
 
 struct retro_vfs_interface *libra_vfs_get_interface(void)

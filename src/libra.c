@@ -137,6 +137,7 @@ void libra_destroy(libra_ctx_t *ctx)
     free(ctx->save_dir);
     free(ctx->assets_dir);
     free(ctx->core_path);
+    free(ctx->username);
     for (unsigned i = 0; i < ctx->opt_count; i++) {
         free(ctx->opt_keys[i]);
         free(ctx->opt_vals[i]);
@@ -189,6 +190,25 @@ void libra_set_fast_forward(libra_ctx_t *ctx, bool enabled)
 {
     if (ctx)
         ctx->fast_forwarding = enabled;
+}
+
+void libra_set_username(libra_ctx_t *ctx, const char *name)
+{
+    if (!ctx) return;
+    free(ctx->username);
+    ctx->username = name ? strdup(name) : NULL;
+}
+
+void libra_set_language(libra_ctx_t *ctx, unsigned language)
+{
+    if (ctx)
+        ctx->language = language;
+}
+
+void libra_set_savestate_context(libra_ctx_t *ctx, unsigned context)
+{
+    if (ctx)
+        ctx->savestate_context = context;
 }
 
 bool libra_load_core(libra_ctx_t *ctx, const char *path)

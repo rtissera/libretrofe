@@ -46,6 +46,16 @@ void libra_set_assets_directory(libra_ctx_t *ctx, const char *path);
 /* Fast-forward mode — cores may skip non-essential work when true */
 void libra_set_fast_forward(libra_ctx_t *ctx, bool enabled);
 
+/* Username reported to cores via GET_USERNAME (NULL = anonymous) */
+void libra_set_username(libra_ctx_t *ctx, const char *name);
+
+/* Language reported to cores via GET_LANGUAGE (RETRO_LANGUAGE_* enum, default 0 = ENGLISH) */
+void libra_set_language(libra_ctx_t *ctx, unsigned language);
+
+/* Savestate context reported to cores via GET_SAVESTATE_CONTEXT.
+ * Values: 0=NORMAL, 1=RUNAHEAD_SAME_INSTANCE, 2=RUNAHEAD_SAME_BINARY, 3=ROLLBACK_NETPLAY */
+void libra_set_savestate_context(libra_ctx_t *ctx, unsigned context);
+
 /* Core */
 bool libra_load_core(libra_ctx_t *ctx, const char *path);
 void libra_unload_core(libra_ctx_t *ctx);

@@ -24,6 +24,10 @@ struct libra_ctx {
 
     bool            fast_forwarding;
 
+    char           *username;
+    unsigned        language;          /* RETRO_LANGUAGE_*; default 0 = ENGLISH */
+    unsigned        savestate_context; /* RETRO_SAVESTATE_CONTEXT_* */
+
     /* Core options: simple fixed-size key/value store */
     char           *opt_keys[LIBRA_MAX_OPTIONS];
     char           *opt_vals[LIBRA_MAX_OPTIONS];
