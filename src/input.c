@@ -18,12 +18,14 @@ int16_t libra_input_state(libra_ctx_t *ctx,
                            unsigned index, unsigned id)
 {
     /* Rollback replay: return stored input instead of polling host */
-    if (ctx->input_override_active && (device & 0xFF) == RETRO_DEVICE_JOYPAD) {
-        if (port < 16) {
+    if (ctx->input_override_active) {
+        if ((device & 0xFF) == RETRO_DEVICE_JOYPAD && port < 16) {
             if (id == RETRO_DEVICE_ID_JOYPAD_MASK)
                 return (int16_t)ctx->input_override[port];
             return (ctx->input_override[port] & (1u << id)) ? 1 : 0;
         }
+        /* Non-joypad devices: return 0 during replay to prevent
+         * live input from leaking and causing desyncs */
         return 0;
     }
 

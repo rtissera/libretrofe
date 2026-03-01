@@ -235,7 +235,57 @@ static retro_perf_tick_t RETRO_CALLCONV perf_get_counter(void)
     return (retro_perf_tick_t)perf_get_time_usec();
 }
 
-static uint64_t RETRO_CALLCONV perf_get_cpu_features(void) { return 0; }
+static uint64_t RETRO_CALLCONV perf_get_cpu_features(void)
+{
+    uint64_t flags = 0;
+
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_IX86) || defined(_M_X64)
+    /* CPUID-based detection for x86/x86_64 */
+    unsigned int eax, ebx, ecx, edx;
+
+    /* leaf 1: basic features */
+    __asm__ __volatile__("cpuid"
+        : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+        : "a"(1));
+
+    if (edx & (1 << 23)) flags |= RETRO_SIMD_MMX;
+    if (edx & (1 << 25)) flags |= RETRO_SIMD_SSE;
+    if (edx & (1 << 26)) flags |= RETRO_SIMD_SSE2;
+    if (edx & (1 << 15)) flags |= RETRO_SIMD_CMOV;
+    if (ecx & (1 <<  0)) flags |= RETRO_SIMD_SSE3;
+    if (ecx & (1 <<  9)) flags |= RETRO_SIMD_SSSE3;
+    if (ecx & (1 << 19)) flags |= RETRO_SIMD_SSE4;
+    if (ecx & (1 << 20)) flags |= RETRO_SIMD_SSE42;
+    if (ecx & (1 << 25)) flags |= RETRO_SIMD_AES;
+    if (ecx & (1 << 28)) flags |= RETRO_SIMD_AVX;
+    if (ecx & (1 << 23)) flags |= RETRO_SIMD_POPCNT;
+    if (ecx & (1 << 22)) flags |= RETRO_SIMD_MOVBE;
+
+    /* leaf 1 extended: MMXEXT (AMD) */
+    __asm__ __volatile__("cpuid"
+        : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+        : "a"(0x80000001));
+    if (edx & (1 << 22)) flags |= RETRO_SIMD_MMXEXT;
+
+    /* leaf 7: extended features */
+    __asm__ __volatile__("cpuid"
+        : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+        : "a"(7), "c"(0));
+    if (ebx & (1 << 5)) flags |= RETRO_SIMD_AVX2;
+
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    /* AArch64 always has NEON/ASIMD */
+    flags |= RETRO_SIMD_NEON | RETRO_SIMD_ASIMD;
+
+#elif defined(__ARM_NEON) || defined(__ARM_NEON__)
+    flags |= RETRO_SIMD_NEON;
+#  if defined(__ARM_FEATURE_FMA) || __ARM_ARCH >= 7
+    flags |= RETRO_SIMD_VFPV3;
+#  endif
+#endif
+
+    return flags;
+}
 static void RETRO_CALLCONV perf_log(void) {}
 static void RETRO_CALLCONV perf_register(struct retro_perf_counter *c)
 {
@@ -350,7 +400,13 @@ bool libra_environment_cb(unsigned cmd, void *data)
             return true;
 
         case RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE:
-            if (data) *(int *)data = 3;
+            /* bit 0 = video, bit 1 = audio, bit 2 = fast-forward hint */
+            if (data) {
+                if (ctx->fast_forwarding)
+                    *(int *)data = (1 << 1) | (1 << 2); /* audio + ff hint, skip video */
+                else
+                    *(int *)data = (1 << 0) | (1 << 1); /* video + audio */
+            }
             return true;
 
         case RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER: {
@@ -562,6 +618,7 @@ bool libra_environment_cb(unsigned cmd, void *data)
         case RETRO_ENVIRONMENT_GET_INPUT_DEVICE_CAPABILITIES:
             if (data) *(uint64_t *)data = (1 << RETRO_DEVICE_JOYPAD)
                                         | (1 << RETRO_DEVICE_MOUSE)
+                                        | (1 << RETRO_DEVICE_KEYBOARD)
                                         | (1 << RETRO_DEVICE_LIGHTGUN)
                                         | (1 << RETRO_DEVICE_ANALOG)
                                         | (1 << RETRO_DEVICE_POINTER);
