@@ -128,6 +128,10 @@ const char *libra_option_category_desc (libra_ctx_t *ctx, unsigned cat_index);
 int         libra_option_category_index(libra_ctx_t *ctx, unsigned opt_index);
 const char *libra_option_desc          (libra_ctx_t *ctx, unsigned opt_index);
 
+/* Dynamic audio rate control — host feeds SDL queue depth each frame */
+void libra_set_audio_queue_depth(libra_ctx_t *ctx, unsigned bytes);
+void libra_set_audio_target_queue(libra_ctx_t *ctx, unsigned target_frames);
+
 /* Save states */
 bool libra_save_state(libra_ctx_t *ctx, const char *path);
 bool libra_load_state(libra_ctx_t *ctx, const char *path);

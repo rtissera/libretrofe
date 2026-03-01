@@ -9,6 +9,10 @@
 #include <strings.h>  /* strcasecmp */
 #include <stdio.h>
 #include <ctype.h>
+#include <zlib.h>
+
+/* Save-state compression header: "LBRA" + uint32_t original size (LE) */
+#define LIBRA_STATE_MAGIC 0x4C425241u  /* "LBRA" */
 
 /* -------------------------------------------------------------------------
  * Global libretro callbacks — cores call these; we dispatch to s_ctx.
@@ -246,6 +250,18 @@ void libra_set_savestate_context(libra_ctx_t *ctx, unsigned context)
         ctx->savestate_context = context;
 }
 
+void libra_set_audio_queue_depth(libra_ctx_t *ctx, unsigned bytes)
+{
+    if (ctx)
+        ctx->audio_queue_bytes = bytes;
+}
+
+void libra_set_audio_target_queue(libra_ctx_t *ctx, unsigned target_frames)
+{
+    if (ctx && ctx->audio)
+        ctx->audio->target_queue_frames = target_frames;
+}
+
 bool libra_load_core(libra_ctx_t *ctx, const char *path)
 {
     if (!ctx || !path)
@@ -447,6 +463,10 @@ void libra_run(libra_ctx_t *ctx)
     if (ctx->has_frame_time_cb && ctx->frame_time_cb.callback)
         ctx->frame_time_cb.callback(ctx->frame_time_cb.reference);
 
+    /* Nudge resampler ratio based on SDL audio queue depth */
+    if (ctx->audio && ctx->audio->target_queue_frames > 0)
+        libra_audio_adjust_rate(ctx->audio, ctx->audio_queue_bytes, 4);
+
     ctx->core->retro_run();
 
     /* Async audio: core generates samples via this callback */
@@ -462,9 +482,20 @@ void libra_run(libra_ctx_t *ctx)
 
     /* Notify core of audio buffer status (for buffer-aware frame-skipping) */
     if (ctx->audio_buf_status_cb && ctx->audio) {
-        unsigned occupancy = ctx->audio->count * 100 / LIBRA_RING_FRAMES;
-        bool underrun_likely = ctx->audio->count < LIBRA_RING_FRAMES / 8;
-        ctx->audio_buf_status_cb(true, occupancy, underrun_likely);
+        if (ctx->audio->target_queue_frames > 0) {
+            /* Report SDL queue depth as occupancy */
+            unsigned queue_frames = ctx->audio_queue_bytes / 4;
+            unsigned capacity     = ctx->audio->target_queue_frames * 4;
+            unsigned occupancy    = queue_frames * 100 / capacity;
+            if (occupancy > 100) occupancy = 100;
+            bool underrun_likely  = queue_frames < ctx->audio->target_queue_frames / 2;
+            ctx->audio_buf_status_cb(true, occupancy, underrun_likely);
+        } else {
+            /* Fallback: report internal ring buffer */
+            unsigned occupancy = ctx->audio->count * 100 / LIBRA_RING_FRAMES;
+            bool underrun_likely = ctx->audio->count < LIBRA_RING_FRAMES / 8;
+            ctx->audio_buf_status_cb(true, occupancy, underrun_likely);
+        }
     }
 }
 
@@ -568,26 +599,48 @@ bool libra_save_state(libra_ctx_t *ctx, const char *path)
     if (size == 0)
         return false;
 
-    void *buf = malloc(size);
-    if (!buf)
+    void *raw = malloc(size);
+    if (!raw)
         return false;
 
-    if (!ctx->core->retro_serialize(buf, size)) {
+    if (!ctx->core->retro_serialize(raw, size)) {
         fprintf(stderr, "libra: retro_serialize failed\n");
-        free(buf);
+        free(raw);
         return false;
     }
+
+    /* Compress with zlib (Z_BEST_SPEED for minimal CPU cost) */
+    uLongf comp_sz = compressBound((uLong)size);
+    void *comp = malloc(comp_sz);
+    if (!comp) {
+        free(raw);
+        return false;
+    }
+
+    if (compress2((Bytef *)comp, &comp_sz,
+                  (const Bytef *)raw, (uLong)size, Z_BEST_SPEED) != Z_OK) {
+        fprintf(stderr, "libra: zlib compress2 failed\n");
+        free(comp);
+        free(raw);
+        return false;
+    }
+    free(raw);
 
     FILE *f = fopen(path, "wb");
     if (!f) {
         fprintf(stderr, "libra: cannot open '%s' for writing\n", path);
-        free(buf);
+        free(comp);
         return false;
     }
 
-    bool ok = (fwrite(buf, 1, size, f) == size);
+    /* Write 8-byte header: magic (4) + original size (4, LE native) */
+    uint32_t magic    = LIBRA_STATE_MAGIC;
+    uint32_t orig_sz  = (uint32_t)size;
+    bool ok = (fwrite(&magic,   1, 4,       f) == 4 &&
+               fwrite(&orig_sz, 1, 4,       f) == 4 &&
+               fwrite(comp,     1, comp_sz,  f) == comp_sz);
     fclose(f);
-    free(buf);
+    free(comp);
     if (!ok)
         fprintf(stderr, "libra: short write to '%s'\n", path);
     return ok;
@@ -602,18 +655,71 @@ bool libra_load_state(libra_ctx_t *ctx, const char *path)
         return false;
     }
 
-    size_t expected = ctx->core->retro_serialize_size();
-
     FILE *f = fopen(path, "rb");
     if (!f) {
         fprintf(stderr, "libra: cannot open '%s' for reading\n", path);
         return false;
     }
 
+    /* Read first 4 bytes to check for compressed header */
+    uint32_t magic = 0;
+    if (fread(&magic, 1, 4, f) != 4) {
+        fprintf(stderr, "libra: state file '%s' is too small\n", path);
+        fclose(f);
+        return false;
+    }
+
+    if (magic == LIBRA_STATE_MAGIC) {
+        /* Compressed state: read original size, then decompress */
+        uint32_t orig_sz = 0;
+        if (fread(&orig_sz, 1, 4, f) != 4) {
+            fprintf(stderr, "libra: truncated header in '%s'\n", path);
+            fclose(f);
+            return false;
+        }
+
+        /* Read remaining compressed payload */
+        long cur = ftell(f);
+        fseek(f, 0, SEEK_END);
+        long end = ftell(f);
+        fseek(f, cur, SEEK_SET);
+        size_t comp_sz = (size_t)(end - cur);
+
+        void *comp = malloc(comp_sz);
+        if (!comp) { fclose(f); return false; }
+
+        if (fread(comp, 1, comp_sz, f) != comp_sz) {
+            fprintf(stderr, "libra: short read from '%s'\n", path);
+            free(comp);
+            fclose(f);
+            return false;
+        }
+        fclose(f);
+
+        uLongf dst_sz = (uLongf)orig_sz;
+        void *raw = malloc(orig_sz);
+        if (!raw) { free(comp); return false; }
+
+        if (uncompress((Bytef *)raw, &dst_sz,
+                       (const Bytef *)comp, (uLong)comp_sz) != Z_OK) {
+            fprintf(stderr, "libra: zlib uncompress failed for '%s'\n", path);
+            free(raw);
+            free(comp);
+            return false;
+        }
+        free(comp);
+
+        bool ok = ctx->core->retro_unserialize(raw, (size_t)dst_sz);
+        free(raw);
+        return ok;
+    }
+
+    /* Raw (uncompressed) state — backward compatible path */
     fseek(f, 0, SEEK_END);
     long fsize = ftell(f);
     rewind(f);
 
+    size_t expected = ctx->core->retro_serialize_size();
     if (fsize <= 0 || (size_t)fsize < expected) {
         fprintf(stderr, "libra: state file '%s' is too small (%ld < %zu)\n",
                 path, fsize, expected);

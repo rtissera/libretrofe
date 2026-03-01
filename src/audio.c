@@ -10,8 +10,9 @@ libra_audio_t *libra_audio_create(double src_rate, unsigned dst_rate)
     libra_audio_t *a = calloc(1, sizeof(*a));
     if (!a)
         return NULL;
-    a->dst_rate = dst_rate;
-    a->ratio    = src_rate / (double)dst_rate;
+    a->dst_rate   = dst_rate;
+    a->base_ratio = src_rate / (double)dst_rate;
+    a->ratio      = a->base_ratio;
     return a;
 }
 
@@ -24,7 +25,8 @@ void libra_audio_set_src_rate(libra_audio_t *a, double src_rate)
 {
     if (!a || a->dst_rate == 0)
         return;
-    a->ratio = src_rate / (double)a->dst_rate;
+    a->base_ratio = src_rate / (double)a->dst_rate;
+    a->ratio      = a->base_ratio;
 }
 
 void libra_audio_push(libra_audio_t *a, int16_t left, int16_t right)
@@ -124,4 +126,25 @@ void libra_audio_flush(libra_audio_t *a,
         fn(userdata, out, out_count);
 
     free(out);
+}
+
+void libra_audio_adjust_rate(libra_audio_t *a, unsigned queue_bytes,
+                              unsigned frame_size)
+{
+    if (!a || a->target_queue_frames == 0 || frame_size == 0)
+        return;
+
+    unsigned queue_frames = queue_bytes / frame_size;
+    double target = (double)a->target_queue_frames;
+    double error  = ((double)queue_frames - target) / target;
+
+    double adjusted = a->base_ratio * (1.0 + error * 0.005);
+
+    /* Clamp to +/-5% of base ratio */
+    double lo = a->base_ratio * 0.95;
+    double hi = a->base_ratio * 1.05;
+    if (adjusted < lo) adjusted = lo;
+    if (adjusted > hi) adjusted = hi;
+
+    a->ratio = adjusted;
 }

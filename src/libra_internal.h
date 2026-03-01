@@ -87,6 +87,9 @@ struct libra_ctx {
     /* Minimum audio latency hint from core (SET_MINIMUM_AUDIO_LATENCY) */
     unsigned min_audio_latency_ms;
 
+    /* SDL audio queue depth in bytes (updated by host each frame) */
+    unsigned audio_queue_bytes;
+
     /* Core-requested fast-forwarding override (SET_FASTFORWARDING_OVERRIDE) */
     struct retro_fastforwarding_override ff_override;
     bool has_ff_override;
