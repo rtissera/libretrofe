@@ -9,7 +9,7 @@
 #include <strings.h>  /* strcasecmp */
 #include <stdio.h>
 #include <ctype.h>
-#include <zlib.h>
+#include "miniz.h"
 
 /* Save-state compression header: "LBRA" + uint32_t original size (LE) */
 #define LIBRA_STATE_MAGIC 0x4C425241u  /* "LBRA" */
@@ -774,6 +774,127 @@ bool libra_unserialize(libra_ctx_t *ctx, const void *data, size_t size)
     if (!ctx->core->retro_unserialize)
         return false;
     return ctx->core->retro_unserialize(data, size);
+}
+
+/* -------------------------------------------------------------------------
+ * Rewind (in-memory compressed ring buffer)
+ * ---------------------------------------------------------------------- */
+
+#include "rewind.h"
+
+bool libra_rewind_init(libra_ctx_t *ctx, unsigned capacity)
+{
+    if (!ctx)
+        return false;
+    libra_rewind_deinit(ctx);
+    ctx->rewind = libra_rewind_create(capacity);
+    return ctx->rewind != NULL;
+}
+
+void libra_rewind_deinit(libra_ctx_t *ctx)
+{
+    if (!ctx)
+        return;
+    libra_rewind_destroy(ctx->rewind);
+    ctx->rewind = NULL;
+}
+
+void libra_rewind_save(libra_ctx_t *ctx)
+{
+    if (!ctx || !ctx->core || !ctx->game_loaded || !ctx->rewind)
+        return;
+    size_t sz = ctx->core->retro_serialize_size();
+    if (sz == 0)
+        return;
+    void *buf = malloc(sz);
+    if (!buf)
+        return;
+    if (ctx->core->retro_serialize(buf, sz))
+        libra_rewind_push(ctx->rewind, buf, sz);
+    free(buf);
+}
+
+bool libra_rewind_restore(libra_ctx_t *ctx)
+{
+    if (!ctx || !ctx->core || !ctx->game_loaded || !ctx->rewind)
+        return false;
+    size_t sz = ctx->core->retro_serialize_size();
+    if (sz == 0)
+        return false;
+    void *buf = malloc(sz);
+    if (!buf)
+        return false;
+    size_t got = libra_rewind_pop(ctx->rewind, buf, sz);
+    bool ok = false;
+    if (got > 0)
+        ok = ctx->core->retro_unserialize(buf, got);
+    free(buf);
+    return ok;
+}
+
+unsigned libra_rewind_available(libra_ctx_t *ctx)
+{
+    if (!ctx)
+        return 0;
+    return libra_rewind_count(ctx->rewind);
+}
+
+/* -------------------------------------------------------------------------
+ * Run-ahead
+ * ---------------------------------------------------------------------- */
+
+void libra_run_ahead(libra_ctx_t *ctx, unsigned frames)
+{
+    if (!ctx || !ctx->core || !ctx->game_loaded || frames == 0) {
+        libra_run(ctx);
+        return;
+    }
+
+    /* Save state */
+    size_t sz = ctx->core->retro_serialize_size();
+    void *state = malloc(sz);
+    if (!state || !ctx->core->retro_serialize(state, sz)) {
+        free(state);
+        libra_run(ctx);
+        return;
+    }
+
+    /* Stash callbacks, mute */
+    libra_video_cb_t      saved_video = ctx->config.video;
+    libra_audio_cb_t      saved_audio = ctx->config.audio;
+    libra_input_poll_cb_t saved_poll  = ctx->config.input_poll;
+    unsigned saved_ctx = ctx->savestate_context;
+    ctx->savestate_context = 1; /* RUNAHEAD_SAME_INSTANCE */
+
+    /* Run N-1 frames silently */
+    ctx->config.video      = NULL;
+    ctx->config.audio      = NULL;
+    ctx->config.input_poll = NULL;
+    for (unsigned i = 0; i < frames - 1; i++)
+        libra_run(ctx);
+
+    /* Run 1 frame with output (the displayed frame) */
+    ctx->config.video      = saved_video;
+    ctx->config.audio      = saved_audio;
+    ctx->config.input_poll = NULL;  /* still skip poll */
+    libra_run(ctx);
+
+    /* Restore to original state */
+    ctx->core->retro_unserialize(state, sz);
+
+    /* Advance real state by 1 frame silently */
+    ctx->config.video      = NULL;
+    ctx->config.audio      = NULL;
+    ctx->config.input_poll = saved_poll;  /* restore poll for real advance */
+    libra_run(ctx);
+
+    /* Restore all callbacks */
+    ctx->config.video      = saved_video;
+    ctx->config.audio      = saved_audio;
+    ctx->config.input_poll = saved_poll;
+    ctx->savestate_context = saved_ctx;
+
+    free(state);
 }
 
 /* -------------------------------------------------------------------------

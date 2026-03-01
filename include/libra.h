@@ -149,6 +149,18 @@ bool libra_load_sram(libra_ctx_t *ctx, const char *path);
  * Returns true if a write was performed. */
 bool libra_save_sram_if_dirty(libra_ctx_t *ctx, const char *path);
 
+/* Rewind (in-memory compressed ring buffer) */
+bool     libra_rewind_init(libra_ctx_t *ctx, unsigned capacity);
+void     libra_rewind_deinit(libra_ctx_t *ctx);
+void     libra_rewind_save(libra_ctx_t *ctx);
+bool     libra_rewind_restore(libra_ctx_t *ctx);
+unsigned libra_rewind_available(libra_ctx_t *ctx);
+
+/* Run-ahead: execute N frames ahead, display only the final frame.
+ * Reduces perceived input latency by N frames.
+ * Temporarily mutes video/audio/input_poll callbacks during silent frames. */
+void libra_run_ahead(libra_ctx_t *ctx, unsigned frames);
+
 /* Controller port — call after libra_load_game; device constants from libretro.h */
 void libra_set_controller(libra_ctx_t *ctx, unsigned port, unsigned device);
 

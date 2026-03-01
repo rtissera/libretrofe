@@ -159,6 +159,9 @@ struct libra_ctx {
     /* Networking state (owned by netplay.c) */
     struct libra_netplay *netplay;
 
+    /* Rewind state (owned by rewind.c) */
+    struct libra_rewind *rewind;
+
     /* Rollback state (owned by rollback.c) */
     struct libra_rollback *rollback;
 
