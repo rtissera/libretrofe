@@ -23,6 +23,20 @@ typedef int16_t (*libra_input_state_cb_t)(void *ud,
 /* effect: 0=strong, 1=weak (matches retro_rumble_effect); strength: 0-65535 */
 typedef void    (*libra_rumble_cb_t)(void *ud,
                     unsigned port, unsigned effect, uint16_t strength);
+/* LED state change: led = LED index, state = 0 or 1 */
+typedef void    (*libra_led_cb_t)(void *ud, int led, int state);
+/* Sensor state: action = RETRO_SENSOR_*_ENABLE/DISABLE, rate = Hz */
+typedef bool    (*libra_sensor_set_state_cb_t)(void *ud, unsigned port,
+                    unsigned action, unsigned rate);
+/* Sensor read: id = RETRO_SENSOR_ACCELEROMETER_X..ILLUMINANCE */
+typedef float   (*libra_sensor_get_input_cb_t)(void *ud, unsigned port, unsigned id);
+
+/* Microphone callbacks (all optional; NULL = no mic support) */
+typedef void   *(*libra_mic_open_cb_t)(void *ud, unsigned rate);
+typedef void    (*libra_mic_close_cb_t)(void *ud, void *mic);
+typedef bool    (*libra_mic_set_state_cb_t)(void *ud, void *mic, bool active);
+typedef bool    (*libra_mic_get_state_cb_t)(void *ud, const void *mic);
+typedef int     (*libra_mic_read_cb_t)(void *ud, void *mic, int16_t *samples, size_t num_samples);
 
 typedef struct {
     libra_video_cb_t       video;
@@ -30,6 +44,14 @@ typedef struct {
     libra_input_poll_cb_t  input_poll;
     libra_input_state_cb_t input_state;
     libra_rumble_cb_t      rumble;          /* optional; NULL = no rumble */
+    libra_led_cb_t         led;             /* optional; NULL = no LED */
+    libra_sensor_set_state_cb_t sensor_set_state; /* optional */
+    libra_sensor_get_input_cb_t sensor_get_input; /* optional */
+    libra_mic_open_cb_t    mic_open;        /* optional; NULL = no mic */
+    libra_mic_close_cb_t   mic_close;
+    libra_mic_set_state_cb_t mic_set_state;
+    libra_mic_get_state_cb_t mic_get_state;
+    libra_mic_read_cb_t    mic_read;
     void                  *userdata;
     unsigned               audio_output_rate;  /* target rate Hz, e.g. 48000 */
 } libra_config_t;

@@ -136,6 +136,102 @@ static bool rumble_set_state(unsigned port,
     return true;
 }
 
+/* LED callback — forwards to host */
+static void led_set_state(int led, int state)
+{
+    if (s_ctx && s_ctx->config.led)
+        s_ctx->config.led(s_ctx->config.userdata, led, state);
+}
+
+/* Sensor callbacks — forward to host */
+static bool sensor_set_state(unsigned port,
+                              enum retro_sensor_action action,
+                              unsigned rate)
+{
+    if (s_ctx && s_ctx->config.sensor_set_state)
+        return s_ctx->config.sensor_set_state(s_ctx->config.userdata,
+                                               port, (unsigned)action, rate);
+    return false;
+}
+
+static float sensor_get_input(unsigned port, unsigned id)
+{
+    if (s_ctx && s_ctx->config.sensor_get_input)
+        return s_ctx->config.sensor_get_input(s_ctx->config.userdata, port, id);
+    return 0.0f;
+}
+
+/* Microphone interface — opaque handle wraps host's mic pointer */
+struct retro_microphone {
+    void    *host_mic;     /* handle returned by host mic_open callback */
+    unsigned rate;
+    bool     active;
+};
+
+static retro_microphone_t *mic_open(const retro_microphone_params_t *params)
+{
+    if (!s_ctx || !s_ctx->config.mic_open)
+        return NULL;
+    unsigned rate = (params && params->rate) ? params->rate : 44100;
+    void *host = s_ctx->config.mic_open(s_ctx->config.userdata, rate);
+    if (!host)
+        return NULL;
+    retro_microphone_t *mic = (retro_microphone_t *)calloc(1, sizeof(*mic));
+    if (!mic) return NULL;
+    mic->host_mic = host;
+    mic->rate     = rate;
+    mic->active   = false;
+    return mic;
+}
+
+static void mic_close(retro_microphone_t *microphone)
+{
+    if (!microphone) return;
+    if (s_ctx && s_ctx->config.mic_close)
+        s_ctx->config.mic_close(s_ctx->config.userdata, microphone->host_mic);
+    free(microphone);
+}
+
+static bool mic_get_params(const retro_microphone_t *microphone,
+                            retro_microphone_params_t *params)
+{
+    if (!microphone || !params) return false;
+    params->rate = microphone->rate;
+    return true;
+}
+
+static bool mic_set_state(retro_microphone_t *microphone, bool state)
+{
+    if (!microphone) return false;
+    if (s_ctx && s_ctx->config.mic_set_state) {
+        bool ok = s_ctx->config.mic_set_state(s_ctx->config.userdata,
+                                               microphone->host_mic, state);
+        if (ok) microphone->active = state;
+        return ok;
+    }
+    return false;
+}
+
+static bool mic_get_state(const retro_microphone_t *microphone)
+{
+    if (!microphone) return false;
+    if (s_ctx && s_ctx->config.mic_get_state)
+        return s_ctx->config.mic_get_state(s_ctx->config.userdata,
+                                            microphone->host_mic);
+    return microphone->active;
+}
+
+static int mic_read(retro_microphone_t *microphone,
+                     int16_t *samples, size_t num_samples)
+{
+    if (!microphone || !samples || num_samples == 0) return -1;
+    if (s_ctx && s_ctx->config.mic_read)
+        return s_ctx->config.mic_read(s_ctx->config.userdata,
+                                       microphone->host_mic,
+                                       samples, num_samples);
+    return -1;
+}
+
 /* -------------------------------------------------------------------------
  * Linux battery status via /sys/class/power_supply
  * ---------------------------------------------------------------------- */
@@ -1015,6 +1111,49 @@ bool libra_environment_cb(unsigned cmd, void *data)
             const struct retro_get_proc_address_interface *iface =
                 (const struct retro_get_proc_address_interface *)data;
             ctx->core_get_proc_address = iface ? iface->get_proc_address : NULL;
+            return true;
+        }
+
+        /* ---- LED ---------------------------------------------------------- */
+
+        case RETRO_ENVIRONMENT_GET_LED_INTERFACE: {
+            struct retro_led_interface *led =
+                (struct retro_led_interface *)data;
+            if (!led) return false;
+            if (!ctx->config.led) return false;
+            led->set_led_state = led_set_state;
+            return true;
+        }
+
+        /* ---- Sensor ------------------------------------------------------- */
+
+        case RETRO_ENVIRONMENT_GET_SENSOR_INTERFACE: {
+            struct retro_sensor_interface *si =
+                (struct retro_sensor_interface *)data;
+            if (!si) return false;
+            if (!ctx->config.sensor_set_state && !ctx->config.sensor_get_input)
+                return false;
+            si->set_sensor_state = sensor_set_state;
+            si->get_sensor_input = sensor_get_input;
+            return true;
+        }
+
+        /* ---- Microphone --------------------------------------------------- */
+
+        case RETRO_ENVIRONMENT_GET_MICROPHONE_INTERFACE: {
+            struct retro_microphone_interface *mi =
+                (struct retro_microphone_interface *)data;
+            if (!mi) return false;
+            if (!ctx->config.mic_open) return false;
+            if (mi->interface_version > RETRO_MICROPHONE_INTERFACE_VERSION)
+                return false;
+            mi->interface_version = RETRO_MICROPHONE_INTERFACE_VERSION;
+            mi->open_mic      = mic_open;
+            mi->close_mic     = mic_close;
+            mi->get_params    = mic_get_params;
+            mi->set_mic_state = mic_set_state;
+            mi->get_mic_state = mic_get_state;
+            mi->read_mic      = mic_read;
             return true;
         }
 
