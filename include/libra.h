@@ -68,6 +68,14 @@ void libra_set_assets_directory(libra_ctx_t *ctx, const char *path);
 /* Fast-forward mode — cores may skip non-essential work when true */
 void libra_set_fast_forward(libra_ctx_t *ctx, bool enabled);
 
+/* Throttle mode reported to cores via GET_THROTTLE_STATE.
+ * Values: 0=NONE, 1=FRAME_STEPPING, 2=FAST_FORWARD, 3=SLOW_MOTION, 4=REWINDING */
+void libra_set_throttle_mode(libra_ctx_t *ctx, unsigned mode);
+
+/* Optional directories */
+void libra_set_playlist_directory(libra_ctx_t *ctx, const char *path);
+void libra_set_file_browser_directory(libra_ctx_t *ctx, const char *path);
+
 /* Username reported to cores via GET_USERNAME (NULL = anonymous) */
 void libra_set_username(libra_ctx_t *ctx, const char *name);
 

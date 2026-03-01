@@ -138,6 +138,8 @@ void libra_destroy(libra_ctx_t *ctx)
     free(ctx->save_dir);
     free(ctx->assets_dir);
     free(ctx->core_path);
+    free(ctx->playlist_dir);
+    free(ctx->file_browser_dir);
     free(ctx->username);
     for (unsigned i = 0; i < ctx->opt_count; i++) {
         free(ctx->opt_keys[i]);
@@ -203,6 +205,26 @@ void libra_set_fast_forward(libra_ctx_t *ctx, bool enabled)
 {
     if (ctx)
         ctx->fast_forwarding = enabled;
+}
+
+void libra_set_throttle_mode(libra_ctx_t *ctx, unsigned mode)
+{
+    if (ctx)
+        ctx->throttle_mode = mode;
+}
+
+void libra_set_playlist_directory(libra_ctx_t *ctx, const char *path)
+{
+    if (!ctx) return;
+    free(ctx->playlist_dir);
+    ctx->playlist_dir = path ? strdup(path) : NULL;
+}
+
+void libra_set_file_browser_directory(libra_ctx_t *ctx, const char *path)
+{
+    if (!ctx) return;
+    free(ctx->file_browser_dir);
+    ctx->file_browser_dir = path ? strdup(path) : NULL;
 }
 
 void libra_set_username(libra_ctx_t *ctx, const char *name)

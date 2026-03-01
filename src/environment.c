@@ -378,6 +378,9 @@ static uint64_t RETRO_CALLCONV perf_get_cpu_features(void)
 #  if defined(__ARM_FEATURE_FMA) || __ARM_ARCH >= 7
     flags |= RETRO_SIMD_VFPV3;
 #  endif
+#  if defined(__ARM_FEATURE_FMA)
+    flags |= RETRO_SIMD_VFPV4;
+#  endif
 #endif
 
     return flags;
@@ -851,13 +854,19 @@ bool libra_environment_cb(unsigned cmd, void *data)
             struct retro_throttle_state *ts =
                 (struct retro_throttle_state *)data;
             if (!ts) return true;
-            if (ctx->fast_forwarding) {
-                ts->mode = RETRO_THROTTLE_FAST_FORWARD;
-                ts->rate = 0.0f;
-            } else {
-                ts->mode = RETRO_THROTTLE_NONE;
-                ts->rate = ctx->core
-                           ? (float)ctx->core->av_info.timing.fps : 0.0f;
+            ts->mode = ctx->throttle_mode;
+            float fps = ctx->core
+                        ? (float)ctx->core->av_info.timing.fps : 0.0f;
+            switch (ctx->throttle_mode) {
+            case RETRO_THROTTLE_FAST_FORWARD:
+                ts->rate = 0.0f; break;
+            case RETRO_THROTTLE_SLOW_MOTION:
+                ts->rate = fps * 0.5f; break;
+            case RETRO_THROTTLE_REWINDING:
+            case RETRO_THROTTLE_FRAME_STEPPING:
+                ts->rate = fps; break;
+            default: /* RETRO_THROTTLE_NONE */
+                ts->rate = fps; break;
             }
             return true;
         }
@@ -1156,6 +1165,34 @@ bool libra_environment_cb(unsigned cmd, void *data)
             mi->read_mic      = mic_read;
             return true;
         }
+
+        /* ---- HW render context negotiation -------------------------------- */
+
+        case RETRO_ENVIRONMENT_SET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE:
+            /* Spec says frontend must return true even when the current API
+             * doesn't use context negotiation (so the core knows we're modern).
+             * We only support GL, so just acknowledge and ignore the data. */
+            return true;
+
+        case RETRO_ENVIRONMENT_GET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_SUPPORT: {
+            struct retro_hw_render_context_negotiation_interface *iface =
+                (struct retro_hw_render_context_negotiation_interface *)data;
+            if (iface) {
+                iface->interface_type = RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN;
+                iface->interface_version = 0; /* 0 = not supported for this API */
+            }
+            return true;
+        }
+
+        /* ---- Optional directories ---------------------------------------- */
+
+        case RETRO_ENVIRONMENT_GET_PLAYLIST_DIRECTORY:
+            if (data) *(const char **)data = ctx->playlist_dir;
+            return true;
+
+        case RETRO_ENVIRONMENT_GET_FILE_BROWSER_START_DIRECTORY:
+            if (data) *(const char **)data = ctx->file_browser_dir;
+            return true;
 
         /* ---- Identity / locale ------------------------------------------- */
 

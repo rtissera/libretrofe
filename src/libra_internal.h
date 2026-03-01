@@ -21,8 +21,11 @@ struct libra_ctx {
     char           *save_dir;
     char           *assets_dir;
     char           *core_path;
+    char           *playlist_dir;
+    char           *file_browser_dir;
 
     bool            fast_forwarding;
+    unsigned        throttle_mode;     /* RETRO_THROTTLE_* for GET_THROTTLE_STATE */
 
     char           *username;
     unsigned        language;          /* RETRO_LANGUAGE_*; default 0 = ENGLISH */
