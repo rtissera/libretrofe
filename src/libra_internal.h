@@ -101,6 +101,19 @@ struct libra_ctx {
     struct retro_system_content_info_override *content_overrides;
     unsigned content_override_count;
 
+    /* SET_SUPPORT_NO_GAME: core can run without content */
+    bool support_no_game;
+
+    /* SET_PERFORMANCE_LEVEL: core-reported computational complexity (0 = low) */
+    unsigned performance_level;
+
+    /* SET_PROC_ADDRESS_CALLBACK: core-provided function lookup */
+    retro_get_proc_address_t core_get_proc_address;
+
+    /* Input descriptors (SET_INPUT_DESCRIPTORS) — deep copy */
+    struct retro_input_descriptor *input_descriptors;
+    unsigned input_descriptor_count;
+
     /* Hardware rendering (SET_HW_RENDER) */
     struct retro_hw_render_callback hw_render;
     bool            has_hw_render;

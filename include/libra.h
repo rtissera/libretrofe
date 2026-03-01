@@ -146,6 +146,17 @@ uint32_t libra_memory_map_read(libra_ctx_t *ctx, uint32_t address,
 /* Core option visibility (updated dynamically by core during retro_run) */
 bool libra_is_option_visible(libra_ctx_t *ctx, const char *key);
 
+/* Input descriptors (populated by core via SET_INPUT_DESCRIPTORS).
+ * Returns the number of descriptors.  For each index 0..count-1:
+ * port, device, index, id identify the input; description is human-readable. */
+unsigned    libra_input_descriptor_count(libra_ctx_t *ctx);
+const char *libra_input_descriptor_description(libra_ctx_t *ctx, unsigned idx);
+void        libra_input_descriptor_info(libra_ctx_t *ctx, unsigned idx,
+                unsigned *port, unsigned *device, unsigned *index, unsigned *id);
+
+/* True if the core called SET_SUPPORT_NO_GAME (can run without content) */
+bool libra_supports_no_game(libra_ctx_t *ctx);
+
 /* Subsystem / multi-ROM loading (e.g. Game Boy link, Sufami Turbo)
  * game_type: matches retro_subsystem_info::id supplied by the core
  * paths[]:   one path per required ROM slot, in the order the core declared them */

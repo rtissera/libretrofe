@@ -495,8 +495,34 @@ bool libra_environment_cb(unsigned cmd, void *data)
 
         /* ---- Input / timing ------------------------------------------------ */
 
-        case RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS:
+        case RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS: {
+            const struct retro_input_descriptor *desc =
+                (const struct retro_input_descriptor *)data;
+            /* Free previous descriptors */
+            if (ctx->input_descriptors) {
+                for (unsigned i = 0; i < ctx->input_descriptor_count; i++)
+                    free((void *)ctx->input_descriptors[i].description);
+                free(ctx->input_descriptors);
+                ctx->input_descriptors = NULL;
+                ctx->input_descriptor_count = 0;
+            }
+            if (!desc) return true;
+            /* Count entries (terminated by NULL description) */
+            unsigned count = 0;
+            while (desc[count].description) count++;
+            if (count == 0) return true;
+            ctx->input_descriptors = calloc(count, sizeof(*ctx->input_descriptors));
+            if (!ctx->input_descriptors) return true;
+            ctx->input_descriptor_count = count;
+            for (unsigned i = 0; i < count; i++) {
+                ctx->input_descriptors[i].port   = desc[i].port;
+                ctx->input_descriptors[i].device  = desc[i].device;
+                ctx->input_descriptors[i].index   = desc[i].index;
+                ctx->input_descriptors[i].id      = desc[i].id;
+                ctx->input_descriptors[i].description = strdup(desc[i].description);
+            }
             return true;
+        }
 
         case RETRO_ENVIRONMENT_SET_CONTROLLER_INFO: {
             const struct retro_controller_info *info =
@@ -607,6 +633,7 @@ bool libra_environment_cb(unsigned cmd, void *data)
             return true;
 
         case RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL:
+            if (data) ctx->performance_level = *(const unsigned *)data;
             return true;
 
         case RETRO_ENVIRONMENT_GET_OVERSCAN:
@@ -614,6 +641,7 @@ bool libra_environment_cb(unsigned cmd, void *data)
             return true;
 
         case RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME:
+            if (data) ctx->support_no_game = *(const bool *)data;
             return true;
 
         case RETRO_ENVIRONMENT_GET_INPUT_DEVICE_CAPABILITIES:
@@ -980,6 +1008,13 @@ bool libra_environment_cb(unsigned cmd, void *data)
                 *preferred = ctx->preferred_hw_context
                              ? ctx->preferred_hw_context
                              : RETRO_HW_CONTEXT_OPENGL_CORE;
+            return true;
+        }
+
+        case RETRO_ENVIRONMENT_SET_PROC_ADDRESS_CALLBACK: {
+            const struct retro_get_proc_address_interface *iface =
+                (const struct retro_get_proc_address_interface *)data;
+            ctx->core_get_proc_address = iface ? iface->get_proc_address : NULL;
             return true;
         }
 

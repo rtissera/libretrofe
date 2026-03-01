@@ -163,6 +163,12 @@ void libra_destroy(libra_ctx_t *ctx)
             free((void *)ctx->content_overrides[i].extensions);
         free(ctx->content_overrides);
     }
+    /* Free input descriptors */
+    if (ctx->input_descriptors) {
+        for (unsigned i = 0; i < ctx->input_descriptor_count; i++)
+            free((void *)ctx->input_descriptors[i].description);
+        free(ctx->input_descriptors);
+    }
     libra_netplay_free(ctx->netplay);
     ctx->netplay = NULL;
     libra_rollback_free(ctx->rollback);
@@ -735,6 +741,35 @@ bool libra_is_option_visible(libra_ctx_t *ctx, const char *key)
             return ctx->opt_visible[i];
     }
     return true; /* unknown key — assume visible */
+}
+
+unsigned libra_input_descriptor_count(libra_ctx_t *ctx)
+{
+    return ctx ? ctx->input_descriptor_count : 0;
+}
+
+const char *libra_input_descriptor_description(libra_ctx_t *ctx, unsigned idx)
+{
+    if (!ctx || idx >= ctx->input_descriptor_count)
+        return NULL;
+    return ctx->input_descriptors[idx].description;
+}
+
+void libra_input_descriptor_info(libra_ctx_t *ctx, unsigned idx,
+                                  unsigned *port, unsigned *device,
+                                  unsigned *index, unsigned *id)
+{
+    if (!ctx || idx >= ctx->input_descriptor_count)
+        return;
+    if (port)   *port   = ctx->input_descriptors[idx].port;
+    if (device) *device = ctx->input_descriptors[idx].device;
+    if (index)  *index  = ctx->input_descriptors[idx].index;
+    if (id)     *id     = ctx->input_descriptors[idx].id;
+}
+
+bool libra_supports_no_game(libra_ctx_t *ctx)
+{
+    return ctx && ctx->support_no_game;
 }
 
 unsigned libra_option_count(libra_ctx_t *ctx)
