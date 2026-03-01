@@ -1,26 +1,72 @@
 # libra
 
-A minimal, self-contained C library for embedding libretro cores as an in-process frontend. Designed to be integrated into existing applications (emulator frontends, media centers, etc.) without pulling in RetroArch or its GPL dependencies.
+A self-contained C library for embedding [libretro](https://www.libretro.com/) cores as an in-process frontend. Designed to be integrated into existing applications (emulator frontends, media centers, etc.) without pulling in RetroArch or its GPL dependencies.
+
+MIT licensed. All code is original — only the public `libretro.h` API header (also MIT) is included.
 
 ## Features
 
-- **Core lifecycle** — load/unload cores and games via `dlopen`
-- **Video** — pixel format negotiation (XRGB1555, XRGB8888, RGB565), rotation support
-- **Audio** — ring buffer with built-in linear resampler, configurable output rate
-- **Input** — up to 8 ports, joypad + analog + keyboard
-- **Save states** — save/load to arbitrary paths
-- **SRAM** — save/load with dirty detection (`libra_save_sram_if_dirty`)
-- **Core options** — get/set/cycle with dynamic visibility support
-- **Disk control** — multi-disk swap for CD-based systems
-- **Cheats** — set/clear cheat codes
-- **Subsystem/multi-ROM** — Game Boy link, Sufami Turbo, etc.
-- **VFS v3** — full virtual filesystem (file I/O, stat, mkdir, directory iteration)
-- **Keyboard callback** — dispatch host key events to cores (DOSBox, ScummVM, VICE)
-- **Frame time callback** — accurate frame timing for cores that request it
-- **Performance interface** — `clock_gettime`-based counters
-- **Memory access** — `libra_get_memory_data/size` for achievements integration
-- **Rumble** — per-port strong/weak motor control
-- **~47 environment callbacks** handled
+### Core lifecycle
+- Load/unload libretro cores via `dlopen`
+- Load/unload games (including multi-ROM subsystems like Game Boy link, Sufami Turbo)
+- Soft reset, shutdown detection
+
+### Video
+- Pixel format negotiation (XRGB1555, XRGB8888, RGB565)
+- Screen rotation (0°/90°/180°/270°)
+- Software framebuffer (zero-copy rendering for compatible cores)
+- **Hardware rendering** — GL Core (3.3+), GL Compat (2.1+), GLES (2.0–3.2) with cascading device capability probing, FBO lifecycle, shared context support
+
+### Audio
+- Ring buffer with built-in linear resampler
+- Configurable output rate (e.g. 48000 Hz)
+- Async audio callback support (for cores like PPSSPP)
+- Frame time callback for accurate timing
+
+### Input
+- Up to 16 ports, joypad + analog + mouse + lightgun + pointer + keyboard
+- Input bitmask support for efficient polling
+- Rumble (strong/weak motor control per port)
+- Input override mechanism (used internally for rollback replay)
+
+### Save system
+- Save states to file with zlib compression (LBZ1 format)
+- In-memory serialization for run-ahead and rewind
+- SRAM save/load with dirty detection (`libra_save_sram_if_dirty`)
+
+### Core options
+- v1 and v2 option parsing with category support
+- Get/set/cycle with dynamic visibility
+- Category enumeration API for building menu UIs
+
+### Memory access
+- `libra_get_memory_data`/`libra_get_memory_size` for direct memory access
+- Memory map descriptor storage and address translation (`libra_memory_map_read`)
+- Designed for RetroAchievements integration (rc_client compatible)
+
+### Netplay — Core packet mode
+- For cores with `SET_NETPACKET_INTERFACE` (e.g. Dinothawr)
+- Wire-compatible with RetroArch (CORE_PACKET_INTERFACE mode)
+- Host + up to 15 clients, relay support
+- TCP on port 55435
+
+### Netplay — Rollback mode
+- For cores with serialization support (most cores)
+- GGPO-style savestate-based rollback
+- Wire-compatible with RetroArch protocol 5–7 (INPUT_FRAME_SYNC)
+- 128-frame ring buffer with input prediction
+- CRC-32 desync detection, compressed savestate exchange
+- Configurable input latency (0–10 frames)
+
+### Miscellaneous
+- Disk control (multi-disk swap for CD-based systems)
+- Cheats (set/clear cheat codes)
+- VFS v2 (POSIX file I/O, stat, mkdir, directory iteration)
+- Performance interface (`clock_gettime`-based counters)
+- Keyboard forwarding (for cores like DOSBox, ScummVM, VICE)
+- Battery/power status (Linux sysfs)
+- Device power, throttle state, fast-forward control
+- **57 environment callbacks** handled, 0 critical gaps
 
 ## Building
 
@@ -30,12 +76,23 @@ cmake .. -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 ```
 
-Static library:
+### Dependencies
+
+- C11 compiler
+- Linux (POSIX) — uses `dlopen`, `clock_gettime`, `opendir`/`readdir`
+- CMake 3.20+
+- zlib (for save state compression, CRC-32, netplay savestate exchange)
+
+### Static library
+
 ```bash
 cmake .. -DBUILD_SHARED_LIBS=OFF
 ```
 
-Cross-compilation (toolchain files included for armhf, arm64, riscv64):
+### Cross-compilation
+
+Toolchain files included for armhf, arm64, riscv64:
+
 ```bash
 cmake .. -DCMAKE_TOOLCHAIN_FILE=../cmake/toolchains/arm64.cmake
 ```
@@ -45,7 +102,6 @@ cmake .. -DCMAKE_TOOLCHAIN_FILE=../cmake/toolchains/arm64.cmake
 ```c
 #include <libra.h>
 
-// Define your callbacks
 void my_video(void *ud, const void *data, unsigned w, unsigned h,
               size_t pitch, int pixel_format) { /* ... */ }
 void my_audio(void *ud, const int16_t *data, size_t frames) { /* ... */ }
@@ -69,9 +125,8 @@ int main(void) {
     libra_load_core(ctx, "/path/to/core_libretro.so");
     libra_load_game(ctx, "/path/to/rom.nes");
 
-    // Game loop
     while (running) {
-        libra_run(ctx);  // calls your video/audio/input callbacks
+        libra_run(ctx);
     }
 
     libra_unload_game(ctx);
@@ -90,19 +145,17 @@ libra/
 ├── include/libra.h         # Public API — the only header you need
 ├── src/
 │   ├── libra.c             # Lifecycle, queries, save states, SRAM
+│   ├── libra_internal.h    # Internal context structure
 │   ├── core.c / core.h     # dlopen/dlsym core loader
-│   ├── environment.c / .h  # RETRO_ENVIRONMENT_* dispatch
+│   ├── environment.c / .h  # RETRO_ENVIRONMENT_* dispatch (57 commands)
 │   ├── audio.c / .h        # Ring buffer + linear resampler
-│   ├── input.c / .h        # Input state helpers
-│   └── vfs.c / .h          # Virtual filesystem (v3)
+│   ├── input.c / .h        # Input state + rollback override
+│   ├── vfs.c / .h          # Virtual filesystem (v2)
+│   ├── netsock.c / .h      # Shared TCP helpers + wire protocol constants
+│   ├── netplay.c / .h      # Core packet netplay (SET_NETPACKET_INTERFACE)
+│   └── rollback.c / .h     # Rollback netplay (GGPO-style, savestate-based)
 └── test/                   # Smoke test
 ```
-
-## Requirements
-
-- C11 compiler
-- Linux (POSIX) — uses `dlopen`, `clock_gettime`, `opendir`/`readdir`
-- CMake 3.20+
 
 ## License
 
