@@ -7,10 +7,8 @@
 #include "audio.h"
 #include "libretro.h"
 
-#define LIBRA_MAX_OPTIONS 256
-#define LIBRA_MAX_PORTS   8
-#define LIBRA_MAX_INPUT_DESCS 256
-#define LIBRA_MAX_CTRL_TYPES  16
+#define LIBRA_MAX_OPTIONS    128
+#define LIBRA_MAX_CATEGORIES  32
 
 struct libra_ctx {
     libra_config_t  config;
@@ -31,11 +29,15 @@ struct libra_ctx {
     char           *opt_vals[LIBRA_MAX_OPTIONS];
     char           *opt_val_list[LIBRA_MAX_OPTIONS]; /* "|"-joined possible values */
     bool            opt_visible[LIBRA_MAX_OPTIONS]; /* per-key visibility hint */
+    int             opt_cat_idx[LIBRA_MAX_OPTIONS]; /* per-option → category index, -1 = none */
+    char           *opt_descs[LIBRA_MAX_OPTIONS];   /* human-readable desc from core */
     unsigned        opt_count;
     bool            opt_updated;
 
-    /* Core options update display callback (core requests visibility refresh) */
-    retro_core_options_update_display_callback_t options_update_display_cb;
+    /* Core option categories */
+    char           *opt_cat_keys[LIBRA_MAX_CATEGORIES];
+    char           *opt_cat_descs[LIBRA_MAX_CATEGORIES];
+    unsigned        opt_cat_count;
 
     /* SRAM dirty-detection shadow copy */
     uint8_t        *sram_shadow;
@@ -54,109 +56,69 @@ struct libra_ctx {
     const struct retro_subsystem_info *subsystem_info;
     unsigned                           subsystem_count;
 
-    /* Video rotation (0-3: 0°, 90°, 180°, 270° counter-clockwise) */
-    unsigned        rotation;
-
-    /* Keyboard callback (used by DOSBox, ScummVM, VICE, etc.) */
+    /* Keyboard callback (SET_KEYBOARD_CALLBACK) */
     retro_keyboard_event_t keyboard_cb;
 
-    /* Frame time callback (called before each retro_run) */
-    retro_frame_time_callback_t frame_time_cb;
-    retro_usec_t    frame_time_reference;   /* ideal frame duration in usec */
-    retro_usec_t    frame_time_last;        /* timestamp of last retro_run */
+    /* Screen rotation (SET_ROTATION): 0=0°, 1=90°CCW, 2=180°, 3=270°CCW */
+    unsigned rotation;
 
-    /* Serialization quirks bitmask from core */
-    uint64_t        serialization_quirks;
+    /* Frame time callback (SET_FRAME_TIME_CALLBACK) */
+    struct retro_frame_time_callback frame_time_cb;
+    bool has_frame_time_cb;
 
-    /* Core declared it can run without content */
-    bool            support_no_game;
+    /* Netpacket interface (core-controlled multiplayer) */
+    struct retro_netpacket_callback netpacket_cb;
+    bool has_netpacket;
 
-    /* Memory map provided by core (pointers owned by core, valid while loaded) */
-    const struct retro_memory_descriptor *memory_descriptors;
-    unsigned        memory_descriptor_count;
+    /* Audio callback (SET_AUDIO_CALLBACK — async audio cores) */
+    struct retro_audio_callback audio_cb;
+    bool has_audio_cb;
 
-    /* Target display refresh rate (set by host, reported to core) */
-    float           target_refresh_rate;
+    /* Hardware rendering (SET_HW_RENDER) */
+    struct retro_hw_render_callback hw_render;
+    bool            has_hw_render;
+    unsigned        hw_fbo;              /* FBO id set by host */
+    retro_hw_get_proc_address_t hw_get_proc_address; /* host-provided */
+    unsigned        preferred_hw_context; /* host-set; 0 = OPENGL_CORE default */
 
-    /* Message from core (SET_MESSAGE / SET_MESSAGE_EXT) */
-    char            message_buf[512];
-    unsigned        message_frames;
-    bool            message_pending;
-
-    /* Audio buffer status callback (core polls buffer occupancy) */
-    retro_audio_buffer_status_callback_t audio_buffer_status_cb;
-
-    /* Minimum audio latency requested by core (ms) */
-    unsigned        min_audio_latency;
-
-    /* Fastforwarding override from core */
-    bool            ff_override_active;
-    float           ff_override_ratio;
-    bool            ff_override_fastforward;
-    bool            ff_override_notification;
-    bool            ff_override_inhibit;
-
-    /* Content info override from core (pointer owned by core) */
-    const struct retro_system_content_info_override *content_info_override;
-
-    /* GET_GAME_INFO_EXT data (built at game load) */
-    char           *game_full_path;
-    char           *game_dir;
-    char           *game_name;    /* basename without extension */
-    char           *game_ext;     /* extension, lowercase */
-    struct retro_game_info_ext game_info_ext;
-
-    /* Throttle state for GET_THROTTLE_STATE */
-    unsigned        throttle_mode;
-    float           throttle_rate;
+    /* Per-type device capabilities (host-registered via libra_set_hw_render_support).
+     * Indexed by retro_hw_context_type (0=NONE .. 7). */
+    struct {
+        bool     supported;
+        unsigned max_major;
+        unsigned max_minor;
+    } hw_caps[8];
+    bool            hw_caps_set;   /* true once any cap registered */
 
     /* Software framebuffer for GET_CURRENT_SOFTWARE_FRAMEBUFFER */
-    void           *sw_framebuffer;
-    size_t          sw_framebuffer_size;
+    void           *sw_fb;
+    size_t          sw_fb_size;
 
-    /* Audio callback (for async audio cores like DOSBox, ScummVM) */
-    retro_audio_callback_t           audio_cb;
-    retro_audio_set_state_callback_t audio_set_state_cb;
+    /* Game info ext for GET_GAME_INFO_EXT */
+    char           *game_path;
+    char           *game_dir;
+    char           *game_name;
+    char           *game_ext;
+    struct retro_game_info_ext game_info_ext;
+    bool            has_game_info_ext;
 
-    /* Input descriptors (deep-copied from core) */
-    struct {
-        unsigned port, device, index, id;
-        char *desc;
-    } input_descs[LIBRA_MAX_INPUT_DESCS];
-    unsigned input_desc_count;
+    /* Memory map (deep copy of core-provided descriptors) */
+    struct retro_memory_descriptor *mem_descriptors;
+    unsigned                        mem_descriptor_count;
 
-    /* Controller info per port (deep-copied from core) */
-    struct {
-        char *desc;
-        unsigned id;
-    } ctrl_types[LIBRA_MAX_PORTS][LIBRA_MAX_CTRL_TYPES];
-    unsigned ctrl_type_count[LIBRA_MAX_PORTS];
+    /* Per-port device types (from SET_CONTROLLER_INFO + retro_set_controller_port_device) */
+    unsigned port_devices[16];  /* RETRO_DEVICE_* per port; default JOYPAD */
+    unsigned port_count;        /* number of ports with known devices */
 
-    /* Audio/video enable flags for run-ahead (default 3 = both) */
-    int audio_video_enable;
+    /* Networking state (owned by netplay.c) */
+    struct libra_netplay *netplay;
 
-    /* Username (host-set, for GET_USERNAME) */
-    char *username;
+    /* Rollback state (owned by rollback.c) */
+    struct libra_rollback *rollback;
 
-    /* Language (for GET_LANGUAGE, default 0 = RETRO_LANGUAGE_ENGLISH) */
-    unsigned language;
-
-    /* Option descriptions (parallel to opt_keys/opt_vals) */
-    char *opt_desc[LIBRA_MAX_OPTIONS];
-
-    /* Option category keys (parallel to opt_keys, v2 only; NULL if no category) */
-    char *opt_category[LIBRA_MAX_OPTIONS];
-
-    /* Core option category definitions (v2) */
-#define LIBRA_MAX_CATEGORIES 32
-    struct {
-        char *key;
-        char *desc;
-    } categories[LIBRA_MAX_CATEGORIES];
-    unsigned category_count;
-
-    /* Geometry change flag (set by SET_GEOMETRY / SET_SYSTEM_AV_INFO) */
-    bool geometry_changed;
+    /* Input override for rollback replay */
+    bool     input_override_active;
+    uint32_t input_override[16];  /* one word per port (joypad bitmask) */
 };
 
 #endif /* LIBRA_INTERNAL_H */

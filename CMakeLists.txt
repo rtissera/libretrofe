@@ -7,6 +7,8 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 option(BUILD_SHARED_LIBS "Build shared library (ON) or static (OFF)" ON)
 
+find_package(ZLIB REQUIRED)
+
 add_library(libra
     src/libra.c
     src/core.c
@@ -14,6 +16,9 @@ add_library(libra
     src/audio.c
     src/input.c
     src/vfs.c
+    src/netplay.c
+    src/netsock.c
+    src/rollback.c
 )
 
 target_include_directories(libra
@@ -24,8 +29,6 @@ target_include_directories(libra
         src
         deps
 )
-
-find_package(ZLIB REQUIRED)
 
 target_compile_options(libra PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(libra PRIVATE ${CMAKE_DL_LIBS} m ZLIB::ZLIB)

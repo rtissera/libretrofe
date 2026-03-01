@@ -3,10 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>    /* ftruncate, fileno */
-#include <sys/stat.h>  /* stat, mkdir */
-#include <dirent.h>    /* opendir, readdir, closedir */
-#include <errno.h>
+#include <unistd.h>  /* ftruncate, fileno */
 
 struct retro_vfs_file_handle {
     FILE *fp;
@@ -143,101 +140,6 @@ static int64_t vfs_truncate(struct retro_vfs_file_handle *stream, int64_t length
     return ftruncate(fileno(stream->fp), (off_t)length) ? -1 : 0;
 }
 
-/* ---- v3 functions -------------------------------------------------------- */
-
-struct retro_vfs_dir_handle {
-    DIR  *dir;
-    struct dirent *entry;  /* current entry from readdir */
-    char *dir_path;
-};
-
-static int vfs_stat(const char *path, int32_t *size)
-{
-    if (!path)
-        return 0;
-    struct stat st;
-    if (stat(path, &st) != 0)
-        return 0;
-
-    int flags = RETRO_VFS_STAT_IS_VALID;
-    if (S_ISDIR(st.st_mode))
-        flags |= RETRO_VFS_STAT_IS_DIRECTORY;
-    if (S_ISCHR(st.st_mode))
-        flags |= RETRO_VFS_STAT_IS_CHARACTER_SPECIAL;
-    if (size)
-        *size = (int32_t)st.st_size;
-    return flags;
-}
-
-static int vfs_mkdir(const char *dir)
-{
-    if (!dir)
-        return -1;
-    if (mkdir(dir, 0755) == 0)
-        return 0;
-    if (errno == EEXIST)
-        return -2;
-    return -1;
-}
-
-static struct retro_vfs_dir_handle *vfs_opendir(const char *dir,
-                                                 bool include_hidden)
-{
-    (void)include_hidden;
-    if (!dir)
-        return NULL;
-    DIR *d = opendir(dir);
-    if (!d)
-        return NULL;
-    struct retro_vfs_dir_handle *h = calloc(1, sizeof(*h));
-    if (!h) { closedir(d); return NULL; }
-    h->dir      = d;
-    h->dir_path = strdup(dir);
-    return h;
-}
-
-static bool vfs_readdir(struct retro_vfs_dir_handle *dirstream)
-{
-    if (!dirstream || !dirstream->dir)
-        return false;
-    dirstream->entry = readdir(dirstream->dir);
-    return dirstream->entry != NULL;
-}
-
-static const char *vfs_dirent_get_name(struct retro_vfs_dir_handle *dirstream)
-{
-    if (!dirstream || !dirstream->entry)
-        return NULL;
-    return dirstream->entry->d_name;
-}
-
-static bool vfs_dirent_is_dir(struct retro_vfs_dir_handle *dirstream)
-{
-    if (!dirstream || !dirstream->entry)
-        return false;
-    /* Use d_type if available (most Linux filesystems) */
-    if (dirstream->entry->d_type != DT_UNKNOWN)
-        return dirstream->entry->d_type == DT_DIR;
-    /* Fallback to stat for filesystems that don't set d_type */
-    char path[4096];
-    snprintf(path, sizeof(path), "%s/%s",
-             dirstream->dir_path, dirstream->entry->d_name);
-    struct stat st;
-    if (stat(path, &st) != 0)
-        return false;
-    return S_ISDIR(st.st_mode);
-}
-
-static int vfs_closedir(struct retro_vfs_dir_handle *dirstream)
-{
-    if (!dirstream)
-        return -1;
-    int r = closedir(dirstream->dir);
-    free(dirstream->dir_path);
-    free(dirstream);
-    return r ? -1 : 0;
-}
-
 /* ---- Interface table ----------------------------------------------------- */
 
 static struct retro_vfs_interface s_vfs = {
@@ -255,14 +157,7 @@ static struct retro_vfs_interface s_vfs = {
     .rename    = vfs_rename,
     /* v2 */
     .truncate  = vfs_truncate,
-    /* v3 */
-    .stat            = vfs_stat,
-    .mkdir           = vfs_mkdir,
-    .opendir         = vfs_opendir,
-    .readdir         = vfs_readdir,
-    .dirent_get_name = vfs_dirent_get_name,
-    .dirent_is_dir   = vfs_dirent_is_dir,
-    .closedir        = vfs_closedir,
+    /* v3 fields left NULL — not advertised */
 };
 
 struct retro_vfs_interface *libra_vfs_get_interface(void)

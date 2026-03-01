@@ -24,21 +24,12 @@ typedef int16_t (*libra_input_state_cb_t)(void *ud,
 typedef void    (*libra_rumble_cb_t)(void *ud,
                     unsigned port, unsigned effect, uint16_t strength);
 
-/* Keyboard event callback — dispatched when core uses SET_KEYBOARD_CALLBACK.
- * down: true=pressed, false=released.
- * keycode: RETROK_* value from libretro.h.
- * character: UTF-32 character, or 0 if unavailable.
- * key_modifiers: RETROKMOD_* bitmask. */
-typedef void    (*libra_keyboard_cb_t)(void *ud, bool down,
-                    unsigned keycode, uint32_t character, uint16_t key_modifiers);
-
 typedef struct {
     libra_video_cb_t       video;
     libra_audio_cb_t       audio;
     libra_input_poll_cb_t  input_poll;
     libra_input_state_cb_t input_state;
     libra_rumble_cb_t      rumble;          /* optional; NULL = no rumble */
-    libra_keyboard_cb_t    keyboard;        /* optional; NULL = no keyboard events */
     void                  *userdata;
     unsigned               audio_output_rate;  /* target rate Hz, e.g. 48000 */
 } libra_config_t;
@@ -90,11 +81,18 @@ const char *libra_option_value(libra_ctx_t *ctx, unsigned index);
  * Returns false if no value list is available for this option. */
 bool        libra_option_cycle(libra_ctx_t *ctx, unsigned index, int direction);
 
-/* Save states (file-based) */
+/* Core option categories (populated from SET_CORE_OPTIONS_V2) */
+unsigned    libra_option_category_count(libra_ctx_t *ctx);
+const char *libra_option_category_key  (libra_ctx_t *ctx, unsigned cat_index);
+const char *libra_option_category_desc (libra_ctx_t *ctx, unsigned cat_index);
+int         libra_option_category_index(libra_ctx_t *ctx, unsigned opt_index);
+const char *libra_option_desc          (libra_ctx_t *ctx, unsigned opt_index);
+
+/* Save states */
 bool libra_save_state(libra_ctx_t *ctx, const char *path);
 bool libra_load_state(libra_ctx_t *ctx, const char *path);
 
-/* Save states (memory-based — for run-ahead / rewind) */
+/* In-memory serialization (for run-ahead / rewind) */
 size_t libra_serialize_size(libra_ctx_t *ctx);
 bool   libra_serialize(libra_ctx_t *ctx, void *data, size_t size);
 bool   libra_unserialize(libra_ctx_t *ctx, const void *data, size_t size);
@@ -118,6 +116,23 @@ bool libra_swap_disk(libra_ctx_t *ctx, unsigned index);
 void libra_clear_cheats(libra_ctx_t *ctx);
 void libra_set_cheat(libra_ctx_t *ctx, unsigned index, bool enabled, const char *code);
 
+/* Core memory access (for RetroAchievements / memory inspection)
+ * id: RETRO_MEMORY_SAVE_RAM (0), RETRO_MEMORY_RTC (1),
+ *     RETRO_MEMORY_SYSTEM_RAM (2), RETRO_MEMORY_VIDEO_RAM (3) */
+void  *libra_get_memory_data(libra_ctx_t *ctx, unsigned id);
+size_t  libra_get_memory_size(libra_ctx_t *ctx, unsigned id);
+
+/* Memory map descriptors (from SET_MEMORY_MAPS).
+ * Returns 0 if the core did not provide a memory map.
+ * Each descriptor has: ptr, start, select, disconnect, len, offset. */
+unsigned libra_memory_map_count(libra_ctx_t *ctx);
+
+/* Read from the core's address space using memory map descriptors.
+ * Translates emulated address → host pointer via descriptor matching.
+ * Returns number of bytes read (0 if address is unmapped). */
+uint32_t libra_memory_map_read(libra_ctx_t *ctx, uint32_t address,
+                                uint8_t *buffer, uint32_t num_bytes);
+
 /* Core option visibility (updated dynamically by core during retro_run) */
 bool libra_is_option_visible(libra_ctx_t *ctx, const char *key);
 
@@ -130,102 +145,131 @@ bool libra_load_game_special(libra_ctx_t *ctx, unsigned game_type,
 /* Returns true if the core called RETRO_ENVIRONMENT_SHUTDOWN */
 bool libra_is_shutdown_requested(libra_ctx_t *ctx);
 
-/* Video rotation requested by core (0=0°, 1=90°, 2=180°, 3=270° CCW) */
+/* Screen rotation requested by core: 0=0°, 1=90°CCW, 2=180°, 3=270°CCW */
 unsigned libra_get_rotation(libra_ctx_t *ctx);
 
-/* Dispatch a keyboard event to the core (if it registered SET_KEYBOARD_CALLBACK).
- * Call this from the host's key event handler.
- * keycode: RETROK_* value; character: UTF-32; key_modifiers: RETROKMOD_* bitmask */
-void libra_dispatch_keyboard(libra_ctx_t *ctx, bool down,
-                              unsigned keycode, uint32_t character,
-                              uint16_t key_modifiers);
+/* ---- Hardware rendering (GL/GLES cores) --------------------------------
+ *
+ * Cores that use RETRO_ENVIRONMENT_SET_HW_RENDER render 3D frames directly
+ * into a GL framebuffer.  The host must create a GL context and FBO, then
+ * call the lifecycle functions below.
+ *
+ * pixel_format == -1 in the video callback signals a HW frame (data=NULL).
+ */
 
-/* Core memory access (for achievements integration, debugging, etc.)
- * id: RETRO_MEMORY_SAVE_RAM, RETRO_MEMORY_RTC, RETRO_MEMORY_SYSTEM_RAM, etc. */
-void  *libra_get_memory_data(libra_ctx_t *ctx, unsigned id);
-size_t  libra_get_memory_size(libra_ctx_t *ctx, unsigned id);
+typedef void *(*libra_get_proc_address_t)(const char *sym);
 
-/* Memory map descriptors (for complex address spaces, e.g. PS1, N64).
- * Returns the count of descriptors. *out is set to the internal array
- * (struct retro_memory_descriptor* from libretro.h, cast to const void*).
- * Valid while a game is loaded; returns 0 if no memory map was provided. */
-unsigned libra_get_memory_map(libra_ctx_t *ctx, const void **out);
+/* Host tells libra what HW context type to advertise to cores via
+ * GET_PREFERRED_HW_RENDER.  Call before libra_load_core().
+ * Values match retro_hw_context_type (e.g. 3 = OPENGL_CORE, 2 = OPENGLES2).
+ * Default (0 or uncalled) = OPENGL_CORE. */
+void libra_set_preferred_hw_render(libra_ctx_t *ctx, unsigned context_type);
 
-/* Returns true if the core can run without content (SET_SUPPORT_NO_GAME) */
-bool libra_supports_no_game(libra_ctx_t *ctx);
+/* Register device capability: the host can create context_type up to
+ * version max_major.max_minor.  Call before libra_load_core().
+ * When caps are registered, SET_HW_RENDER rejects unsupported types/versions.
+ * context_type values: 1=OPENGL, 2=OPENGLES2, 3=OPENGL_CORE,
+ * 4=OPENGLES3, 5=OPENGLES_VERSION */
+void libra_set_hw_render_support(libra_ctx_t *ctx, unsigned context_type,
+                                  unsigned max_major, unsigned max_minor);
 
-/* Set the target display refresh rate reported to the core (default: 60 Hz) */
-void libra_set_target_refresh_rate(libra_ctx_t *ctx, float rate);
+/* Queries (valid after libra_load_game) */
+bool     libra_hw_render_enabled(libra_ctx_t *ctx);
+unsigned libra_hw_render_context_type(libra_ctx_t *ctx);
+unsigned libra_hw_render_version_major(libra_ctx_t *ctx);
+unsigned libra_hw_render_version_minor(libra_ctx_t *ctx);
+bool     libra_hw_render_bottom_left_origin(libra_ctx_t *ctx);
+bool     libra_hw_render_depth(libra_ctx_t *ctx);
+bool     libra_hw_render_stencil(libra_ctx_t *ctx);
 
-/* Invoke the core's options-update-display callback if registered.
- * Returns true if option visibility changed. Call before rendering options UI. */
-bool libra_update_option_visibility(libra_ctx_t *ctx);
+/* Host sets these before calling context_reset */
+void libra_hw_render_set_fbo(libra_ctx_t *ctx, unsigned fbo);
+void libra_hw_render_set_get_proc_address(libra_ctx_t *ctx,
+         libra_get_proc_address_t proc);
 
-/* Poll latest core message (SET_MESSAGE / SET_MESSAGE_EXT).
- * Returns message text, or NULL if no pending message.
- * Calling this clears the pending flag. *frames receives display duration. */
-const char *libra_poll_message(libra_ctx_t *ctx, unsigned *frames);
+/* Lifecycle: host calls after creating GL context + FBO */
+void libra_hw_render_context_reset(libra_ctx_t *ctx);
+/* Host calls before destroying GL context */
+void libra_hw_render_context_destroy(libra_ctx_t *ctx);
 
-/* Throttle mode constants (mirrors RETRO_THROTTLE_* for host convenience) */
-#define LIBRA_THROTTLE_NONE           0
-#define LIBRA_THROTTLE_FRAME_STEPPING 1
-#define LIBRA_THROTTLE_FAST_FORWARD   2
-#define LIBRA_THROTTLE_SLOW_MOTION    3
-#define LIBRA_THROTTLE_REWINDING      4
+/* Forward a keyboard event to the core (for cores using SET_KEYBOARD_CALLBACK).
+ * keycode: RETROK_* value from libretro.h
+ * character: Unicode codepoint of the key (0 if non-printable)
+ * key_modifiers: RETROKMOD_* bitmask */
+void libra_keyboard_event(libra_ctx_t *ctx, bool down,
+                           unsigned keycode, uint32_t character,
+                           uint16_t key_modifiers);
 
-/* Set throttle state reported to core via GET_THROTTLE_STATE */
-void libra_set_throttle_state(libra_ctx_t *ctx, unsigned mode, float rate);
+/* ---- Netpacket (core-controlled multiplayer) ----------------------------
+ *
+ * Wire protocol is compatible with RetroArch (CORE_PACKET_INTERFACE mode).
+ * Only supported for cores that register RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE.
+ */
 
-/* Check if core requested fastforwarding override via SET_FASTFORWARDING_OVERRIDE.
- * Returns true if an override is active. *fastforward receives requested state. */
-bool libra_get_ff_override(libra_ctx_t *ctx, bool *fastforward);
+/* Callback: the networking layer wants to display an OSD message */
+typedef void (*libra_net_message_cb_t)(void *userdata, const char *msg);
 
-/* Get minimum audio latency requested by core (ms), or 0 if not set */
-unsigned libra_get_min_audio_latency(libra_ctx_t *ctx);
+/* True if the loaded core registered a netpacket interface */
+bool        libra_has_netpacket(libra_ctx_t *ctx);
+/* Core-supplied protocol version string, or NULL */
+const char *libra_netpacket_core_version(libra_ctx_t *ctx);
 
-/* Get audio buffer occupancy percentage (0-100) */
-unsigned libra_get_audio_occupancy(libra_ctx_t *ctx);
+/* Host: start listening.  msg_cb is called for status/error messages. */
+bool libra_netplay_host(libra_ctx_t *ctx, uint16_t port,
+                        libra_net_message_cb_t msg_cb);
 
-/* Audio/video enable flags (bitmask: bit0=video, bit1=audio; default 3=both).
- * Use 1 (video only) or 2 (audio only) during run-ahead frames. */
-void libra_set_audio_video_enable(libra_ctx_t *ctx, int flags);
+/* Client: connect to host_ip:port (blocks briefly for handshake). */
+bool libra_netplay_join(libra_ctx_t *ctx, const char *host_ip,
+                        uint16_t port, libra_net_message_cb_t msg_cb);
 
-/* Username reported to core via GET_USERNAME (NULL = anonymous) */
-void libra_set_username(libra_ctx_t *ctx, const char *name);
+/* Call once per frame before libra_run().
+ * Accepts connections (host), reads packets, dispatches to core.
+ * Returns false if the connection was lost. */
+bool libra_netplay_poll(libra_ctx_t *ctx);
 
-/* Language reported to core (RETRO_LANGUAGE_* values, default 0 = English) */
-void libra_set_language(libra_ctx_t *ctx, unsigned lang);
+/* Disconnect and tear down. */
+void libra_netplay_disconnect(libra_ctx_t *ctx);
 
-/* Option description text (human-readable label from core definition) */
-const char *libra_option_desc(libra_ctx_t *ctx, unsigned index);
+/* True if a netplay session is active (hosting or connected). */
+bool libra_netplay_active(libra_ctx_t *ctx);
+/* True if peer is connected and playing. */
+bool libra_netplay_connected(libra_ctx_t *ctx);
+/* True if we are the host. */
+bool libra_netplay_is_host(libra_ctx_t *ctx);
+/* True if host is waiting for a peer. */
+bool libra_netplay_is_waiting(libra_ctx_t *ctx);
+/* Our client_id (0 = host, >= 1 = client). */
+uint16_t libra_netplay_client_id(libra_ctx_t *ctx);
+/* Number of playing peers (excludes ourselves). */
+unsigned libra_netplay_peer_count(libra_ctx_t *ctx);
 
-/* Input descriptors (core-declared button names).
- * Returns the description string, or NULL if index is out of range.
- * Optionally writes port/device/index/id through the pointers. */
-unsigned    libra_input_descriptor_count(libra_ctx_t *ctx);
-const char *libra_input_descriptor(libra_ctx_t *ctx, unsigned i,
-                unsigned *port, unsigned *device, unsigned *index, unsigned *id);
+/* ---- Rollback netplay (savestate-based, wire-compatible with RetroArch) --
+ *
+ * For cores that support serialization but NOT the netpacket interface.
+ * Uses GGPO-style rollback: each peer captures local input, exchanges it
+ * over TCP, and when a prediction was wrong, loads a savestate and replays.
+ */
 
-/* Controller info per port (core-declared supported device types).
- * Returns the description string, or NULL. Writes device_id if non-NULL. */
-unsigned    libra_controller_type_count(libra_ctx_t *ctx, unsigned port);
-const char *libra_controller_type(libra_ctx_t *ctx, unsigned port,
-                unsigned i, unsigned *device_id);
+bool libra_rollback_host(libra_ctx_t *ctx, uint16_t port,
+                         libra_net_message_cb_t msg_cb);
+bool libra_rollback_join(libra_ctx_t *ctx, const char *host_ip,
+                         uint16_t port, libra_net_message_cb_t msg_cb);
 
-/* Returns true (and clears flag) if core changed geometry via SET_GEOMETRY
- * or SET_SYSTEM_AV_INFO since the last call. Use for live aspect updates. */
-bool libra_geometry_changed(libra_ctx_t *ctx);
+/* Call instead of libra_run() when rollback is active.
+ * Handles input exchange, rollback detection, replay, and core execution.
+ * Returns false if connection lost. */
+bool libra_rollback_run(libra_ctx_t *ctx);
 
-/* Returns true if the core requires a full filesystem path (not data blob) */
-bool libra_core_needs_fullpath(libra_ctx_t *ctx);
+void libra_rollback_disconnect(libra_ctx_t *ctx);
 
-/* Option category (v2): returns category_key for the option at index, or NULL */
-const char *libra_option_category(libra_ctx_t *ctx, unsigned index);
+bool     libra_rollback_active(libra_ctx_t *ctx);
+bool     libra_rollback_connected(libra_ctx_t *ctx);
+bool     libra_rollback_is_host(libra_ctx_t *ctx);
+/* True during rollback replay (host should mute OSD / skip non-essential work) */
+bool     libra_rollback_is_replay(libra_ctx_t *ctx);
 
-/* Category definitions (populated from SET_CORE_OPTIONS_V2) */
-unsigned    libra_category_count(libra_ctx_t *ctx);
-const char *libra_category_key (libra_ctx_t *ctx, unsigned index);
-const char *libra_category_desc(libra_ctx_t *ctx, unsigned index);
+void     libra_rollback_set_input_latency(libra_ctx_t *ctx, unsigned frames);
+unsigned libra_rollback_input_latency(libra_ctx_t *ctx);
 
 #ifdef __cplusplus
 }
