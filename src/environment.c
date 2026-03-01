@@ -603,6 +603,7 @@ bool libra_environment_cb(unsigned cmd, void *data)
         }
 
         case RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS:
+            if (data) ctx->supports_achievements = *(const bool *)data;
             return true;
 
         case RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL:
@@ -636,32 +637,87 @@ bool libra_environment_cb(unsigned cmd, void *data)
             if (data) *(unsigned *)data = 1;
             return true;
 
-        case RETRO_ENVIRONMENT_SET_SERIALIZATION_QUIRKS:
+        case RETRO_ENVIRONMENT_SET_SERIALIZATION_QUIRKS: {
+            /* Read quirk flags from core, clear unsupported bits, write back */
+            uint64_t *quirks = (uint64_t *)data;
+            if (!quirks) return true;
+            const uint64_t supported =
+                RETRO_SERIALIZATION_QUIRK_INCOMPLETE |
+                RETRO_SERIALIZATION_QUIRK_MUST_INITIALIZE |
+                RETRO_SERIALIZATION_QUIRK_CORE_VARIABLE_SIZE |
+                RETRO_SERIALIZATION_QUIRK_FRONT_VARIABLE_SIZE;
+            *quirks &= supported;
+            ctx->serialization_quirks = *quirks;
             return true;
+        }
 
-        case RETRO_ENVIRONMENT_SET_CONTENT_INFO_OVERRIDE:
+        case RETRO_ENVIRONMENT_SET_CONTENT_INFO_OVERRIDE: {
+            const struct retro_system_content_info_override *overrides =
+                (const struct retro_system_content_info_override *)data;
+            /* Free previous overrides */
+            if (ctx->content_overrides) {
+                for (unsigned i = 0; i < ctx->content_override_count; i++)
+                    free((void *)ctx->content_overrides[i].extensions);
+                free(ctx->content_overrides);
+                ctx->content_overrides = NULL;
+                ctx->content_override_count = 0;
+            }
+            if (!overrides) return true; /* NULL = query support */
+            /* Count entries (terminated by NULL extensions) */
+            unsigned count = 0;
+            while (overrides[count].extensions) count++;
+            if (count == 0) return true;
+            ctx->content_overrides = calloc(count, sizeof(*ctx->content_overrides));
+            if (!ctx->content_overrides) return true;
+            ctx->content_override_count = count;
+            for (unsigned i = 0; i < count; i++) {
+                ctx->content_overrides[i].extensions =
+                    strdup(overrides[i].extensions);
+                ctx->content_overrides[i].need_fullpath =
+                    overrides[i].need_fullpath;
+                ctx->content_overrides[i].persistent_data =
+                    overrides[i].persistent_data;
+            }
             return true;
+        }
 
         case RETRO_ENVIRONMENT_GET_GAME_INFO_EXT:
             if (!ctx->has_game_info_ext) return false;
             *(const struct retro_game_info_ext **)data = &ctx->game_info_ext;
             return true;
 
-        case RETRO_ENVIRONMENT_SET_FASTFORWARDING_OVERRIDE:
+        case RETRO_ENVIRONMENT_SET_FASTFORWARDING_OVERRIDE: {
+            const struct retro_fastforwarding_override *ff =
+                (const struct retro_fastforwarding_override *)data;
+            if (!ff) return true; /* NULL = query support */
+            ctx->ff_override = *ff;
+            ctx->has_ff_override = true;
+            /* Apply core's request unless host has inhibit control */
+            ctx->fast_forwarding = ff->fastforward;
             return true;
+        }
 
         case RETRO_ENVIRONMENT_GET_JIT_CAPABLE:
             if (data) *(bool *)data = true;
             return true;
 
-        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_UPDATE_DISPLAY_CALLBACK:
+        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_UPDATE_DISPLAY_CALLBACK: {
+            const struct retro_core_options_update_display_callback *cb =
+                (const struct retro_core_options_update_display_callback *)data;
+            ctx->opt_update_display_cb = cb ? cb->callback : NULL;
             return true;
+        }
 
         case RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY:
+            if (data) ctx->min_audio_latency_ms = *(const unsigned *)data;
             return true;
 
-        case RETRO_ENVIRONMENT_SET_AUDIO_BUFFER_STATUS_CALLBACK:
+        case RETRO_ENVIRONMENT_SET_AUDIO_BUFFER_STATUS_CALLBACK: {
+            const struct retro_audio_buffer_status_callback *cb =
+                (const struct retro_audio_buffer_status_callback *)data;
+            ctx->audio_buf_status_cb = cb ? cb->callback : NULL;
             return true;
+        }
 
         case RETRO_ENVIRONMENT_GET_SAVESTATE_CONTEXT:
             if (data) *(unsigned *)data = ctx->savestate_context;

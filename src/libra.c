@@ -6,6 +6,7 @@
 #include "rollback.h"
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>  /* strcasecmp */
 #include <stdio.h>
 #include <ctype.h>
 
@@ -156,6 +157,12 @@ void libra_destroy(libra_ctx_t *ctx)
             free((void *)ctx->mem_descriptors[i].addrspace);
         free(ctx->mem_descriptors);
     }
+    /* Free content info overrides */
+    if (ctx->content_overrides) {
+        for (unsigned i = 0; i < ctx->content_override_count; i++)
+            free((void *)ctx->content_overrides[i].extensions);
+        free(ctx->content_overrides);
+    }
     libra_netplay_free(ctx->netplay);
     ctx->netplay = NULL;
     libra_rollback_free(ctx->rollback);
@@ -272,9 +279,34 @@ bool libra_load_game(libra_ctx_t *ctx, const char *path)
     struct retro_game_info game = { 0 };
     game.path = path;
 
-    /* If the core needs full path, we just pass it without data.
-     * Cores that need the data buffer set need_fullpath = false. */
-    if (!ctx->core->sys_info.need_fullpath && path) {
+    /* Determine need_fullpath: check content info overrides first, then
+     * fall back to the core's global sys_info.need_fullpath. */
+    bool need_fullpath = ctx->core->sys_info.need_fullpath;
+    if (ctx->content_overrides && ctx->content_override_count > 0 && path) {
+        const char *dot = strrchr(path, '.');
+        if (dot && dot[1]) {
+            const char *ext = dot + 1;
+            for (unsigned i = 0; i < ctx->content_override_count; i++) {
+                const char *exts = ctx->content_overrides[i].extensions;
+                if (!exts) continue;
+                /* Check if ext matches any in the "|"-delimited list */
+                char *tmp = strdup(exts);
+                char *tok = strtok(tmp, "|");
+                while (tok) {
+                    if (strcasecmp(tok, ext) == 0) {
+                        need_fullpath = ctx->content_overrides[i].need_fullpath;
+                        free(tmp);
+                        goto fullpath_resolved;
+                    }
+                    tok = strtok(NULL, "|");
+                }
+                free(tmp);
+            }
+        }
+    }
+fullpath_resolved:
+
+    if (!need_fullpath && path) {
         FILE *f = fopen(path, "rb");
         if (f) {
             fseek(f, 0, SEEK_END);
@@ -398,6 +430,13 @@ void libra_run(libra_ctx_t *ctx)
         libra_audio_flush(ctx->audio,
                           (libra_audio_output_fn)ctx->config.audio,
                           ctx->config.userdata);
+    }
+
+    /* Notify core of audio buffer status (for buffer-aware frame-skipping) */
+    if (ctx->audio_buf_status_cb && ctx->audio) {
+        unsigned occupancy = ctx->audio->count * 100 / LIBRA_RING_FRAMES;
+        bool underrun_likely = ctx->audio->count < LIBRA_RING_FRAMES / 8;
+        ctx->audio_buf_status_cb(true, occupancy, underrun_likely);
     }
 }
 

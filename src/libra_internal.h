@@ -78,6 +78,29 @@ struct libra_ctx {
     struct retro_audio_callback audio_cb;
     bool has_audio_cb;
 
+    /* Audio buffer status callback (SET_AUDIO_BUFFER_STATUS_CALLBACK) */
+    retro_audio_buffer_status_callback_t audio_buf_status_cb;
+
+    /* Minimum audio latency hint from core (SET_MINIMUM_AUDIO_LATENCY) */
+    unsigned min_audio_latency_ms;
+
+    /* Core-requested fast-forwarding override (SET_FASTFORWARDING_OVERRIDE) */
+    struct retro_fastforwarding_override ff_override;
+    bool has_ff_override;
+
+    /* Core options update display callback (SET_CORE_OPTIONS_UPDATE_DISPLAY_CALLBACK) */
+    retro_core_options_update_display_callback_t opt_update_display_cb;
+
+    /* Core reports achievement support (SET_SUPPORT_ACHIEVEMENTS) */
+    bool supports_achievements;
+
+    /* Serialization quirks (SET_SERIALIZATION_QUIRKS) */
+    uint64_t serialization_quirks;
+
+    /* Content info overrides (SET_CONTENT_INFO_OVERRIDE) */
+    struct retro_system_content_info_override *content_overrides;
+    unsigned content_override_count;
+
     /* Hardware rendering (SET_HW_RENDER) */
     struct retro_hw_render_callback hw_render;
     bool            has_hw_render;
