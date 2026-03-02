@@ -569,13 +569,20 @@ bool libra_environment_cb(unsigned cmd, void *data)
         case RETRO_ENVIRONMENT_SET_MESSAGE: {
             const struct retro_message *msg = (const struct retro_message *)data;
             fprintf(stderr, "libra [MSG] %s\n", msg->msg);
+            /* Buffer into OSD queue for host to display */
+            if (ctx->osd_count < LIBRA_OSD_MAX && msg->msg) {
+                unsigned i = ctx->osd_count++;
+                snprintf(ctx->osd_queue[i].text,
+                         sizeof(ctx->osd_queue[i].text), "%s", msg->msg);
+                ctx->osd_queue[i].duration_frames =
+                    msg->frames > 0 ? msg->frames : 180;
+            }
             return true;
         }
 
         case RETRO_ENVIRONMENT_SET_MESSAGE_EXT: {
             const struct retro_message_ext *msg =
                 (const struct retro_message_ext *)data;
-            /* Route to log or OSD — we just forward to stderr */
             const char *lvl;
             switch (msg->level) {
                 case RETRO_LOG_DEBUG: lvl = "[DEBUG]"; break;
@@ -584,6 +591,17 @@ bool libra_environment_cb(unsigned cmd, void *data)
                 default:              lvl = "[INFO] "; break;
             }
             fprintf(stderr, "libra %s %s\n", lvl, msg->msg);
+            /* Buffer into OSD queue for host to display */
+            if (ctx->osd_count < LIBRA_OSD_MAX && msg->msg) {
+                unsigned i = ctx->osd_count++;
+                snprintf(ctx->osd_queue[i].text,
+                         sizeof(ctx->osd_queue[i].text), "%s", msg->msg);
+                /* Convert ms → frames (assume ~60 fps) */
+                unsigned frames = msg->duration > 0
+                                  ? (msg->duration * 60 / 1000) : 180;
+                if (frames < 30) frames = 30;
+                ctx->osd_queue[i].duration_frames = frames;
+            }
             return true;
         }
 

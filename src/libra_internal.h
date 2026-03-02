@@ -168,6 +168,18 @@ struct libra_ctx {
     /* Input override for rollback replay */
     bool     input_override_active;
     uint32_t input_override[16];  /* one word per port (joypad bitmask) */
+
+    /* Input remapping: remap[port][button] = target button; identity = no remap */
+    int8_t   remap[16][16];
+    bool     remap_loaded;
+
+    /* OSD message queue (buffered from SET_MESSAGE / SET_MESSAGE_EXT) */
+#define LIBRA_OSD_MAX 8
+    struct {
+        char     text[256];
+        unsigned duration_frames;
+    } osd_queue[LIBRA_OSD_MAX];
+    unsigned osd_count;
 };
 
 #endif /* LIBRA_INTERNAL_H */

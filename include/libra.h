@@ -338,6 +338,83 @@ bool     libra_rollback_is_replay(libra_ctx_t *ctx);
 void     libra_rollback_set_input_latency(libra_ctx_t *ctx, unsigned frames);
 unsigned libra_rollback_input_latency(libra_ctx_t *ctx);
 
+/* ---- File parsers (cheat / option / m3u) -------------------------------- */
+
+/* Load cheats from a RetroArch-compatible .cht file.
+ * Calls libra_clear_cheats + libra_set_cheat for each entry.
+ * Returns number of cheats applied. */
+unsigned libra_load_cheats(libra_ctx_t *ctx, const char *path);
+
+/* Load/save per-game core options from/to an INI-style .opt file.
+ * Format: key = "value" (one per line, # comments supported). */
+unsigned libra_load_options(libra_ctx_t *ctx, const char *path);
+void     libra_save_options(libra_ctx_t *ctx, const char *path);
+
+/* Resolve an m3u playlist entry.  If path is not an .m3u file, copies path
+ * to out unchanged.  Returns true on success, false if disc_index is out of
+ * range or the file cannot be read. */
+bool libra_resolve_m3u(const char *path, unsigned disc_index,
+                       char *out, size_t out_size);
+
+/* ---- Input remapping ---------------------------------------------------- */
+
+/* Initialise identity remap table (call after loading core). */
+void libra_init_remaps(libra_ctx_t *ctx);
+
+/* Load a .rmp remap file (RetroArch format).
+ * Returns number of remappings applied. */
+unsigned libra_load_remaps(libra_ctx_t *ctx, const char *path);
+
+/* ---- Mouse → libretro pointer conversion -------------------------------- */
+
+/* Convert mouse pixel coordinates to normalised libretro pointer values.
+ * vp_x/y/w/h define the game viewport in pixels.
+ * Returns false if the mouse is outside the viewport. */
+bool libra_mouse_to_pointer(float mouse_x, float mouse_y,
+                            float vp_x, float vp_y, float vp_w, float vp_h,
+                            int16_t *out_x, int16_t *out_y);
+
+/* ---- OSD message queue -------------------------------------------------- */
+
+/* Number of pending OSD messages (buffered from core SET_MESSAGE calls). */
+unsigned    libra_osd_count(libra_ctx_t *ctx);
+/* Peek at message at index (0 = oldest).  Returns NULL if index out of range. */
+const char *libra_osd_text(libra_ctx_t *ctx, unsigned index);
+unsigned    libra_osd_duration(libra_ctx_t *ctx, unsigned index);
+/* Clear all pending OSD messages (call after draining into host OSD). */
+void        libra_osd_clear(libra_ctx_t *ctx);
+
+/* ---- Options menu state machine ----------------------------------------- */
+
+typedef struct libra_options_menu libra_options_menu_t;
+
+libra_options_menu_t *libra_options_menu_create(libra_ctx_t *ctx);
+void libra_options_menu_destroy(libra_options_menu_t *menu);
+
+/* Navigation actions */
+#define LIBRA_MENU_UP     0
+#define LIBRA_MENU_DOWN   1
+#define LIBRA_MENU_LEFT   2
+#define LIBRA_MENU_RIGHT  3
+#define LIBRA_MENU_ACCEPT 4
+#define LIBRA_MENU_BACK   5
+
+/* Process a navigation input.  Returns:
+ *   0 = handled, menu still open
+ *   1 = menu should close
+ *   2 = an option value was changed (host should persist) */
+int libra_options_menu_input(libra_options_menu_t *menu, int action);
+
+/* Query state for rendering */
+unsigned    libra_options_menu_level(const libra_options_menu_t *menu);
+unsigned    libra_options_menu_category_count(const libra_options_menu_t *menu);
+unsigned    libra_options_menu_item_count(const libra_options_menu_t *menu);
+const char *libra_options_menu_item_label(const libra_options_menu_t *menu, unsigned i);
+const char *libra_options_menu_item_value(const libra_options_menu_t *menu, unsigned i);
+bool        libra_options_menu_item_selected(const libra_options_menu_t *menu, unsigned i);
+int         libra_options_menu_scroll_offset(const libra_options_menu_t *menu);
+int         libra_options_menu_total_count(const libra_options_menu_t *menu);
+
 #ifdef __cplusplus
 }
 #endif

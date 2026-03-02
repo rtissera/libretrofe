@@ -1619,3 +1619,255 @@ unsigned libra_rollback_input_latency(libra_ctx_t *ctx)
     if (!ctx || !ctx->rollback) return 0;
     return libra_rb_input_latency(ctx->rollback);
 }
+
+/* -------------------------------------------------------------------------
+ * Cheat file loading (.cht — RetroArch format)
+ * ---------------------------------------------------------------------- */
+
+unsigned libra_load_cheats(libra_ctx_t *ctx, const char *path)
+{
+    if (!ctx || !path)
+        return 0;
+
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+
+    libra_clear_cheats(ctx);
+
+#define LOAD_CHEATS_MAX 256
+    bool  enable[LOAD_CHEATS_MAX];
+    char *codes[LOAD_CHEATS_MAX];
+    memset(enable, 0, sizeof(enable));
+    memset(codes, 0, sizeof(codes));
+
+    char line[1024];
+    while (fgets(line, sizeof(line), f)) {
+        int len = (int)strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'
+                           || line[len-1] == ' '))
+            line[--len] = '\0';
+
+        int  idx = -1;
+        char val[64] = {0};
+        if (sscanf(line, "cheat%d_enable = %63s", &idx, val) == 2
+            && idx >= 0 && idx < LOAD_CHEATS_MAX) {
+            enable[idx] = (strcmp(val, "true") == 0);
+            continue;
+        }
+
+        const char *tag = strstr(line, "_code = ");
+        if (tag && sscanf(line, "cheat%d_code", &idx) == 1
+            && idx >= 0 && idx < LOAD_CHEATS_MAX) {
+            const char *code = tag + 8;
+            while (*code == ' ' || *code == '\t') code++;
+            int clen = (int)strlen(code);
+            if (clen >= 2 && code[0] == '"' && code[clen-1] == '"') {
+                free(codes[idx]);
+                codes[idx] = (char *)malloc(clen - 1);
+                if (codes[idx]) {
+                    memcpy(codes[idx], code + 1, clen - 2);
+                    codes[idx][clen - 2] = '\0';
+                }
+            } else if (clen > 0) {
+                free(codes[idx]);
+                codes[idx] = strdup(code);
+            }
+        }
+    }
+    fclose(f);
+
+    unsigned applied = 0;
+    for (int i = 0; i < LOAD_CHEATS_MAX; i++) {
+        if (codes[i]) {
+            libra_set_cheat(ctx, (unsigned)i, enable[i], codes[i]);
+            free(codes[i]);
+            applied++;
+        }
+    }
+#undef LOAD_CHEATS_MAX
+
+    return applied;
+}
+
+/* -------------------------------------------------------------------------
+ * Core option file I/O (.opt — INI-style)
+ * ---------------------------------------------------------------------- */
+
+unsigned libra_load_options(libra_ctx_t *ctx, const char *path)
+{
+    if (!ctx || !path)
+        return 0;
+
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+
+    char line[1024];
+    unsigned applied = 0;
+    while (fgets(line, sizeof(line), f)) {
+        int len = (int)strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'
+                           || line[len-1] == ' '))
+            line[--len] = '\0';
+        if (line[0] == '#' || line[0] == '\0')
+            continue;
+
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+
+        /* Extract key (trim trailing spaces) */
+        *eq = '\0';
+        char *key = line;
+        while (*key == ' ') key++;
+        char *kend = eq - 1;
+        while (kend > key && *kend == ' ') *kend-- = '\0';
+
+        /* Extract value (trim, strip quotes) */
+        char *val = eq + 1;
+        while (*val == ' ') val++;
+        int vlen = (int)strlen(val);
+        while (vlen > 0 && val[vlen-1] == ' ') val[--vlen] = '\0';
+        if (vlen >= 2 && val[0] == '"' && val[vlen-1] == '"') {
+            val[vlen-1] = '\0';
+            val++;
+        }
+
+        if (*key && *val) {
+            libra_set_option(ctx, key, val);
+            applied++;
+        }
+    }
+    fclose(f);
+
+    return applied;
+}
+
+void libra_save_options(libra_ctx_t *ctx, const char *path)
+{
+    if (!ctx || !path)
+        return;
+
+    unsigned total = ctx->opt_count;
+    if (total == 0) return;
+
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+
+    for (unsigned i = 0; i < total; i++) {
+        const char *key = ctx->opt_keys[i];
+        const char *val = ctx->opt_vals[i];
+        if (key && val)
+            fprintf(f, "%s = \"%s\"\n", key, val);
+    }
+    fclose(f);
+}
+
+/* -------------------------------------------------------------------------
+ * M3U disc path resolution
+ * ---------------------------------------------------------------------- */
+
+bool libra_resolve_m3u(const char *path, unsigned disc_index,
+                       char *out, size_t out_size)
+{
+    if (!path || !out || out_size == 0)
+        return false;
+
+    /* Check extension is .m3u (case-insensitive) */
+    const char *dot = strrchr(path, '.');
+    if (!dot || (strcasecmp(dot, ".m3u") != 0)) {
+        /* Not an m3u — copy path as-is */
+        size_t len = strlen(path);
+        if (len >= out_size) return false;
+        memcpy(out, path, len + 1);
+        return true;
+    }
+
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+
+    /* Extract parent directory */
+    const char *last_sep = strrchr(path, '/');
+    size_t dir_len = last_sep ? (size_t)(last_sep - path) : 0;
+
+    char line[1024];
+    unsigned idx = 0;
+    bool found = false;
+    while (fgets(line, sizeof(line), f)) {
+        /* Trim whitespace */
+        int len = (int)strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'
+                           || line[len-1] == ' '))
+            line[--len] = '\0';
+        if (len == 0 || line[0] == '#')
+            continue;
+
+        if (idx == disc_index) {
+            /* Build full path: dir + "/" + line */
+            size_t needed = dir_len + 1 + (size_t)len + 1;
+            if (needed > out_size) break;
+            if (dir_len > 0) {
+                memcpy(out, path, dir_len);
+                out[dir_len] = '/';
+                memcpy(out + dir_len + 1, line, (size_t)len + 1);
+            } else {
+                memcpy(out, line, (size_t)len + 1);
+            }
+            found = true;
+            break;
+        }
+        idx++;
+    }
+    fclose(f);
+
+    /* If disc not found, copy original path */
+    if (!found) {
+        size_t len = strlen(path);
+        if (len >= out_size) return false;
+        memcpy(out, path, len + 1);
+    }
+    return true;
+}
+
+/* -------------------------------------------------------------------------
+ * Mouse → libretro pointer conversion
+ * ---------------------------------------------------------------------- */
+
+bool libra_mouse_to_pointer(float mouse_x, float mouse_y,
+                            float vp_x, float vp_y, float vp_w, float vp_h,
+                            int16_t *out_x, int16_t *out_y)
+{
+    if (vp_w <= 0 || vp_h <= 0 || !out_x || !out_y)
+        return false;
+    float nx = (mouse_x - vp_x) / vp_w * 2.0f - 1.0f;
+    float ny = (mouse_y - vp_y) / vp_h * 2.0f - 1.0f;
+    if (nx < -1.0f || nx > 1.0f || ny < -1.0f || ny > 1.0f)
+        return false;
+    *out_x = (int16_t)(nx * 0x7FFF);
+    *out_y = (int16_t)(ny * 0x7FFF);
+    return true;
+}
+
+/* -------------------------------------------------------------------------
+ * OSD message queue
+ * ---------------------------------------------------------------------- */
+
+unsigned libra_osd_count(libra_ctx_t *ctx)
+{
+    return ctx ? ctx->osd_count : 0;
+}
+
+const char *libra_osd_text(libra_ctx_t *ctx, unsigned index)
+{
+    if (!ctx || index >= ctx->osd_count) return NULL;
+    return ctx->osd_queue[index].text;
+}
+
+unsigned libra_osd_duration(libra_ctx_t *ctx, unsigned index)
+{
+    if (!ctx || index >= ctx->osd_count) return 0;
+    return ctx->osd_queue[index].duration_frames;
+}
+
+void libra_osd_clear(libra_ctx_t *ctx)
+{
+    if (ctx) ctx->osd_count = 0;
+}

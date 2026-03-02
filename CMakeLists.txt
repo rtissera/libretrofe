@@ -13,6 +13,7 @@ add_library(libra
     src/environment.c
     src/audio.c
     src/input.c
+    src/menu.c
     src/vfs.c
     src/netplay.c
     src/netsock.c
