@@ -94,7 +94,7 @@ static int64_t vfs_seek(struct retro_vfs_file_handle *stream,
     }
     if (fseek(stream->fp, (long)offset, whence) != 0)
         return -1;
-    return (int64_t)ftell(stream->fp);
+    return 0;   /* match RetroArch: 0 on success, not new position */
 }
 
 static int64_t vfs_read(struct retro_vfs_file_handle *stream,
@@ -241,8 +241,12 @@ static bool vfs_dirent_is_dir(struct retro_vfs_dir_handle *dirstream)
         return false;
 
 #ifdef _DIRENT_HAVE_D_TYPE
-    if (dirstream->entry->d_type != DT_UNKNOWN)
-        return dirstream->entry->d_type == DT_DIR;
+    if (dirstream->entry->d_type == DT_DIR)
+        return true;
+    /* DT_LNK and DT_UNKNOWN need stat() to resolve */
+    if (dirstream->entry->d_type != DT_UNKNOWN &&
+        dirstream->entry->d_type != DT_LNK)
+        return false;
 #endif
 
     /* Fallback: stat the entry */
