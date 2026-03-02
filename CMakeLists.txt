@@ -19,6 +19,7 @@ add_library(libra
     src/rollback.c
     src/rewind.c
     deps/miniz.c
+    deps/zstd.c
 )
 
 target_include_directories(libra

@@ -784,10 +784,13 @@ bool libra_unserialize(libra_ctx_t *ctx, const void *data, size_t size)
 
 bool libra_rewind_init(libra_ctx_t *ctx, unsigned capacity)
 {
-    if (!ctx)
+    if (!ctx || !ctx->core || !ctx->game_loaded)
         return false;
     libra_rewind_deinit(ctx);
-    ctx->rewind = libra_rewind_create(capacity);
+    size_t sz = ctx->core->retro_serialize_size();
+    if (sz == 0)
+        return false;
+    ctx->rewind = libra_rewind_create(capacity, sz);
     return ctx->rewind != NULL;
 }
 
@@ -803,33 +806,25 @@ void libra_rewind_save(libra_ctx_t *ctx)
 {
     if (!ctx || !ctx->core || !ctx->game_loaded || !ctx->rewind)
         return;
-    size_t sz = ctx->core->retro_serialize_size();
-    if (sz == 0)
-        return;
-    void *buf = malloc(sz);
-    if (!buf)
+    /* Serialize directly into the rewind's pre-allocated buffer */
+    void *buf = libra_rewind_serialize_buf(ctx->rewind);
+    size_t sz = libra_rewind_state_size(ctx->rewind);
+    if (!buf || sz == 0)
         return;
     if (ctx->core->retro_serialize(buf, sz))
-        libra_rewind_push(ctx->rewind, buf, sz);
-    free(buf);
+        libra_rewind_push(ctx->rewind);
 }
 
 bool libra_rewind_restore(libra_ctx_t *ctx)
 {
     if (!ctx || !ctx->core || !ctx->game_loaded || !ctx->rewind)
         return false;
-    size_t sz = ctx->core->retro_serialize_size();
-    if (sz == 0)
+    /* Decompress into the rewind's pre-allocated buffer */
+    size_t got = libra_rewind_pop(ctx->rewind);
+    if (got == 0)
         return false;
-    void *buf = malloc(sz);
-    if (!buf)
-        return false;
-    size_t got = libra_rewind_pop(ctx->rewind, buf, sz);
-    bool ok = false;
-    if (got > 0)
-        ok = ctx->core->retro_unserialize(buf, got);
-    free(buf);
-    return ok;
+    return ctx->core->retro_unserialize(
+        libra_rewind_serialize_buf(ctx->rewind), got);
 }
 
 unsigned libra_rewind_available(libra_ctx_t *ctx)

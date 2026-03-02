@@ -1,83 +1,117 @@
 // SPDX-License-Identifier: MIT
 #include "rewind.h"
-#include "miniz.h"
+#include "zstd.h"
 #include <stdlib.h>
 #include <string.h>
 
 struct libra_rewind {
-    uint8_t  **slots;       /* compressed data per slot */
-    size_t    *comp_sizes;  /* compressed size per slot */
-    size_t    *orig_sizes;  /* original uncompressed size per slot */
+    /* Pre-allocated serialize buffer (retro_serialize target) */
+    uint8_t   *serialize_buf;
+    size_t     state_size;       /* retro_serialize_size(), fixed per core */
+
+    /* Pre-allocated compression output buffer */
+    uint8_t   *compress_buf;
+    size_t     compress_buf_size;
+
+    /* Persistent zstd contexts (avoid per-frame alloc inside zstd) */
+    ZSTD_CCtx *cctx;
+    ZSTD_DCtx *dctx;
+
+    /* Ring buffer of compressed snapshots.
+     * Each slot is a fixed-size region inside a single contiguous arena.
+     * comp_sizes[i] stores the actual compressed bytes in that slot. */
+    uint8_t   *arena;            /* capacity * slot_size contiguous bytes */
+    size_t     slot_size;        /* ZSTD_compressBound(state_size) */
+    size_t    *comp_sizes;       /* actual compressed size per slot */
+
     unsigned   capacity;
-    unsigned   head;        /* next write position */
-    unsigned   count;       /* number of filled slots */
+    unsigned   head;             /* next write position */
+    unsigned   count;            /* number of filled slots */
 };
 
-libra_rewind_t *libra_rewind_create(unsigned capacity)
+libra_rewind_t *libra_rewind_create(unsigned capacity, size_t state_size)
 {
-    if (capacity == 0)
+    if (capacity == 0 || state_size == 0)
         return NULL;
 
     libra_rewind_t *rw = calloc(1, sizeof(*rw));
     if (!rw)
         return NULL;
 
-    rw->slots      = calloc(capacity, sizeof(uint8_t *));
-    rw->comp_sizes = calloc(capacity, sizeof(size_t));
-    rw->orig_sizes = calloc(capacity, sizeof(size_t));
+    rw->state_size = state_size;
     rw->capacity   = capacity;
 
-    if (!rw->slots || !rw->comp_sizes || !rw->orig_sizes) {
-        free(rw->slots);
-        free(rw->comp_sizes);
-        free(rw->orig_sizes);
-        free(rw);
-        return NULL;
-    }
+    /* Pre-allocate serialize buffer */
+    rw->serialize_buf = malloc(state_size);
+    if (!rw->serialize_buf)
+        goto fail;
+
+    /* Pre-allocate compression output buffer */
+    rw->compress_buf_size = ZSTD_compressBound(state_size);
+    rw->compress_buf = malloc(rw->compress_buf_size);
+    if (!rw->compress_buf)
+        goto fail;
+
+    /* Create persistent zstd contexts */
+    rw->cctx = ZSTD_createCCtx();
+    rw->dctx = ZSTD_createDCtx();
+    if (!rw->cctx || !rw->dctx)
+        goto fail;
+
+    /* Pre-allocate contiguous arena for all ring slots */
+    rw->slot_size  = rw->compress_buf_size;
+    rw->arena      = malloc((size_t)capacity * rw->slot_size);
+    rw->comp_sizes = calloc(capacity, sizeof(size_t));
+    if (!rw->arena || !rw->comp_sizes)
+        goto fail;
 
     return rw;
+
+fail:
+    libra_rewind_destroy(rw);
+    return NULL;
 }
 
 void libra_rewind_destroy(libra_rewind_t *rw)
 {
     if (!rw)
         return;
-    for (unsigned i = 0; i < rw->capacity; i++)
-        free(rw->slots[i]);
-    free(rw->slots);
+    free(rw->serialize_buf);
+    free(rw->compress_buf);
+    if (rw->cctx) ZSTD_freeCCtx(rw->cctx);
+    if (rw->dctx) ZSTD_freeDCtx(rw->dctx);
+    free(rw->arena);
     free(rw->comp_sizes);
-    free(rw->orig_sizes);
     free(rw);
 }
 
-bool libra_rewind_push(libra_rewind_t *rw, const void *raw, size_t raw_size)
+void *libra_rewind_serialize_buf(libra_rewind_t *rw)
 {
-    if (!rw || !raw || raw_size == 0)
+    return rw ? rw->serialize_buf : NULL;
+}
+
+size_t libra_rewind_state_size(const libra_rewind_t *rw)
+{
+    return rw ? rw->state_size : 0;
+}
+
+bool libra_rewind_push(libra_rewind_t *rw)
+{
+    if (!rw)
         return false;
 
-    uLong bound = compressBound((uLong)raw_size);
-    uint8_t *buf = malloc(bound);
-    if (!buf)
+    /* Compress serialize_buf → compress_buf using persistent context */
+    size_t comp_sz = ZSTD_compressCCtx(rw->cctx,
+                                        rw->compress_buf, rw->compress_buf_size,
+                                        rw->serialize_buf, rw->state_size,
+                                        1 /* level 1 = fastest */);
+    if (ZSTD_isError(comp_sz))
         return false;
 
-    uLong comp_sz = bound;
-    if (compress2(buf, &comp_sz, (const Bytef *)raw, (uLong)raw_size,
-                  Z_BEST_SPEED) != Z_OK) {
-        free(buf);
-        return false;
-    }
-
-    /* Shrink to actual size */
-    uint8_t *shrunk = realloc(buf, comp_sz);
-    if (shrunk)
-        buf = shrunk;
-
-    /* Free old slot at head (if ring is full, this overwrites oldest) */
-    free(rw->slots[rw->head]);
-
-    rw->slots[rw->head]      = buf;
+    /* Copy compressed data into the ring slot */
+    uint8_t *slot = rw->arena + (size_t)rw->head * rw->slot_size;
+    memcpy(slot, rw->compress_buf, comp_sz);
     rw->comp_sizes[rw->head] = comp_sz;
-    rw->orig_sizes[rw->head] = raw_size;
 
     rw->head = (rw->head + 1) % rw->capacity;
     if (rw->count < rw->capacity)
@@ -86,30 +120,27 @@ bool libra_rewind_push(libra_rewind_t *rw, const void *raw, size_t raw_size)
     return true;
 }
 
-size_t libra_rewind_pop(libra_rewind_t *rw, void *buf, size_t buf_size)
+size_t libra_rewind_pop(libra_rewind_t *rw)
 {
-    if (!rw || rw->count == 0 || !buf)
+    if (!rw || rw->count == 0)
         return 0;
 
     /* Move head back to the most recent slot */
     rw->head = (rw->head - 1 + rw->capacity) % rw->capacity;
     rw->count--;
 
-    size_t orig = rw->orig_sizes[rw->head];
-    if (buf_size < orig)
+    uint8_t *slot = rw->arena + (size_t)rw->head * rw->slot_size;
+    size_t comp_sz = rw->comp_sizes[rw->head];
+
+    /* Decompress directly into serialize_buf using persistent context */
+    size_t orig = ZSTD_decompressDCtx(rw->dctx,
+                                       rw->serialize_buf, rw->state_size,
+                                       slot, comp_sz);
+    if (ZSTD_isError(orig))
         return 0;
 
-    uLong dest_len = (uLong)buf_size;
-    if (uncompress((Bytef *)buf, &dest_len,
-                   rw->slots[rw->head], (uLong)rw->comp_sizes[rw->head]) != Z_OK)
-        return 0;
-
-    free(rw->slots[rw->head]);
-    rw->slots[rw->head]      = NULL;
     rw->comp_sizes[rw->head] = 0;
-    rw->orig_sizes[rw->head] = 0;
-
-    return (size_t)dest_len;
+    return orig;
 }
 
 unsigned libra_rewind_count(const libra_rewind_t *rw)
