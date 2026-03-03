@@ -11,7 +11,7 @@ extern "C" {
 
 #define LIBRA_SHADER_MAX_PASSES  16
 #define LIBRA_SHADER_MAX_LUTS     8
-#define LIBRA_SHADER_MAX_PARAMS  64
+#define LIBRA_SHADER_MAX_PARAMS  256
 
 enum libra_scale_type {
     LIBRA_SCALE_SOURCE   = 0,
