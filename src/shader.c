@@ -207,6 +207,80 @@ unsigned libra_shader_extract_params(const char *source,
 }
 
 /* ========================================================================= */
+/* Recursive parameter extraction (follows #include directives)               */
+/* ========================================================================= */
+
+#define EXTRACT_INCLUDES_MAX_DEPTH 16
+
+/* Extract #pragma parameter lines from source AND from any #include'd files.
+ * Recurses into #include "file" directives, resolving paths relative to
+ * base_dir (the directory of the current file, not the preset).
+ * Deduplicates by param id.  depth guards against infinite recursion. */
+static void extract_params_with_includes(const char *source, const char *base_dir,
+    libra_shader_param_t *params, unsigned *param_count,
+    unsigned max, int depth)
+{
+    if (!source || !params || !param_count || depth > EXTRACT_INCLUDES_MAX_DEPTH)
+        return;
+
+    /* Extract params from this source */
+    libra_shader_param_t tmp[LIBRA_SHADER_MAX_PARAMS];
+    unsigned found = libra_shader_extract_params(source, tmp, LIBRA_SHADER_MAX_PARAMS);
+    for (unsigned j = 0; j < found && *param_count < max; j++) {
+        bool dup = false;
+        for (unsigned k = 0; k < *param_count; k++) {
+            if (strcmp(params[k].id, tmp[j].id) == 0) { dup = true; break; }
+        }
+        if (!dup)
+            params[(*param_count)++] = tmp[j];
+    }
+
+    /* Scan for #include "file" directives and recurse */
+    const char *p = source;
+    while ((p = strstr(p, "#include")) != NULL) {
+        if (p != source && p[-1] != '\n') { p++; continue; }
+        const char *q = p + 8;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q != '"') { p = q; continue; }
+        q++;
+        const char *qe = strchr(q, '"');
+        if (!qe) { p = q; continue; }
+
+        /* Build the included file's path */
+        size_t rel_len = (size_t)(qe - q);
+        char inc_path[1024];
+        if (rel_len > 0 && q[0] == '/') {
+            snprintf(inc_path, sizeof(inc_path), "%.*s", (int)rel_len, q);
+        } else {
+            snprintf(inc_path, sizeof(inc_path), "%s/%.*s", base_dir, (int)rel_len, q);
+        }
+
+        size_t inc_len = 0;
+        char *inc_src = read_file(inc_path, &inc_len);
+        if (inc_src) {
+            /* Determine the included file's directory */
+            char inc_dir[512];
+            const char *sl = strrchr(inc_path, '/');
+            if (sl) {
+                size_t dlen = (size_t)(sl - inc_path);
+                if (dlen >= sizeof(inc_dir)) dlen = sizeof(inc_dir) - 1;
+                memcpy(inc_dir, inc_path, dlen);
+                inc_dir[dlen] = '\0';
+            } else {
+                snprintf(inc_dir, sizeof(inc_dir), ".");
+            }
+
+            extract_params_with_includes(inc_src, inc_dir,
+                                          params, param_count, max,
+                                          depth + 1);
+            free(inc_src);
+        }
+
+        p = qe + 1;
+    }
+}
+
+/* ========================================================================= */
 /* Preset parser                                                              */
 /* ========================================================================= */
 
@@ -499,23 +573,30 @@ static bool preset_load_internal(libra_shader_preset_t *out, const char *path, i
     /* Detect .glsl vs .slang from first shader's extension */
     out->is_slang = ends_with_ci(out->passes[0].path, ".slang") ? 1 : 0;
 
-    /* Read each shader file and extract parameters */
+    /* Read each shader file and extract parameters (including #include'd files) */
     for (unsigned i = 0; i < out->pass_count; i++) {
         size_t src_len = 0;
         char *src = read_file(out->passes[i].path, &src_len);
         if (!src) continue;
 
-        libra_shader_param_t tmp_params[LIBRA_SHADER_MAX_PARAMS];
-        unsigned found = libra_shader_extract_params(src, tmp_params, LIBRA_SHADER_MAX_PARAMS);
-        for (unsigned j = 0; j < found && out->param_count < LIBRA_SHADER_MAX_PARAMS; j++) {
-            /* Skip duplicates across passes */
-            bool dup = false;
-            for (unsigned k = 0; k < out->param_count; k++) {
-                if (strcmp(out->params[k].id, tmp_params[j].id) == 0) { dup = true; break; }
+        /* Determine the shader file's directory for resolving #include paths */
+        char shader_dir[512];
+        {
+            const char *sl = strrchr(out->passes[i].path, '/');
+            if (sl) {
+                size_t dlen = (size_t)(sl - out->passes[i].path);
+                if (dlen >= sizeof(shader_dir))
+                    dlen = sizeof(shader_dir) - 1;
+                memcpy(shader_dir, out->passes[i].path, dlen);
+                shader_dir[dlen] = '\0';
+            } else {
+                snprintf(shader_dir, sizeof(shader_dir), ".");
             }
-            if (!dup)
-                out->params[out->param_count++] = tmp_params[j];
         }
+
+        extract_params_with_includes(src, shader_dir,
+                                      out->params, &out->param_count,
+                                      LIBRA_SHADER_MAX_PARAMS, 0);
         free(src);
     }
 
@@ -547,21 +628,75 @@ static bool preset_load_internal(libra_shader_preset_t *out, const char *path, i
 
 bool libra_glsl_split(const char *source, size_t len,
     const char *version_line,
+    bool is_gles,
     char *vs_out, size_t vs_size, char *fs_out, size_t fs_size)
 {
     if (!source || !vs_out || !fs_out || vs_size < 256 || fs_size < 256)
         return false;
 
+    /* Extract #version from source (if any) and build the body without it */
+    char extracted_version[128] = {0};
+    {
+        const char *p = source;
+        const char *end = source + len;
+        while (p < end) {
+            const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
+            if (!nl) nl = end;
+            size_t ll = (size_t)(nl - p);
+            if (ll >= 8 && strncmp(p, "#version", 8) == 0) {
+                size_t cpy = ll;
+                if (cpy >= sizeof(extracted_version) - 1)
+                    cpy = sizeof(extracted_version) - 2;
+                memcpy(extracted_version, p, cpy);
+                extracted_version[cpy] = '\n';
+                extracted_version[cpy + 1] = '\0';
+                break;
+            }
+            p = (nl < end) ? nl + 1 : end;
+        }
+    }
+
+    /* Determine the version line to use */
+    const char *ver;
+    if (is_gles) {
+        ver = "#version 300 es\nprecision mediump float;\n";
+    } else if (extracted_version[0]) {
+        ver = extracted_version;
+    } else if (version_line && version_line[0]) {
+        ver = version_line;
+    } else {
+        ver = "";  /* Default to GLSL 1.10 (no #version) */
+    }
+
     size_t vp = 0, fp = 0;
-    size_t vl = strlen(version_line);
 
     /* Prepend version line */
-    vp = sappend(vs_out, vp, vs_size, version_line, vl);
-    fp = sappend(fs_out, fp, fs_size, version_line, vl);
+    vp = sappend_str(vs_out, vp, vs_size, ver);
+    fp = sappend_str(fs_out, fp, fs_size, ver);
 
     /* Add stage defines + PARAMETER_UNIFORM for runtime param control */
     vp = sappend_str(vs_out, vp, vs_size, "#define VERTEX\n#define PARAMETER_UNIFORM\n");
     fp = sappend_str(fs_out, fp, fs_size, "#define FRAGMENT\n#define PARAMETER_UNIFORM\n");
+
+    /* GLES keyword remapping */
+    if (is_gles) {
+        vp = sappend_str(vs_out, vp, vs_size,
+            "#define attribute in\n"
+            "#define varying out\n"
+            "#define texture2D(s,c) texture(s,c)\n");
+        fp = sappend_str(fs_out, fp, fs_size,
+            "#define varying in\n"
+            "#define texture2D(s,c) texture(s,c)\n");
+        /* GLES 3.0: gl_FragColor doesn't exist.  Redirect for shaders
+         * that use it directly (those with compat macros declare their
+         * own 'out vec4 FragColor' in the #if __VERSION__ >= 130 path). */
+        if (strstr(source, "gl_FragColor") != NULL &&
+            strstr(source, "out vec4 FragColor") == NULL) {
+            fp = sappend_str(fs_out, fp, fs_size,
+                "#define gl_FragColor FragColor\n"
+                "out vec4 FragColor;\n");
+        }
+    }
 
     /* Copy source, skipping #version lines (already prepended) and
      * #pragma parameter lines (not needed in compiled shader) */

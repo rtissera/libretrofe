@@ -23,6 +23,8 @@ add_library(libra
     src/rewind.c
     src/shader.c
     src/slang_spirv.cpp
+    src/video.c
+    src/image.c
     deps/miniz.c
     deps/zstd.c
 )

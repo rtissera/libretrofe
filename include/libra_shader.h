@@ -73,9 +73,11 @@ unsigned libra_shader_extract_params(const char *source,
     libra_shader_param_t *params, unsigned max);
 
 /* Split a .glsl source into VS and FS by prepending #define VERTEX/FRAGMENT.
- * version_line is prepended (e.g. "#version 100\n"). */
+ * version_line is used as fallback if no #version found in source.
+ * When is_gles is true, forces #version 300 es with keyword remapping. */
 bool libra_glsl_split(const char *source, size_t len,
     const char *version_line,
+    bool is_gles,
     char *vs_out, size_t vs_size, char *fs_out, size_t fs_size);
 
 /* Compile .slang via SPIR-V pipeline -> target GLSL.

@@ -384,6 +384,45 @@ unsigned    libra_osd_duration(libra_ctx_t *ctx, unsigned index);
 /* Clear all pending OSD messages (call after draining into host OSD). */
 void        libra_osd_clear(libra_ctx_t *ctx);
 
+/* ---- Video helpers ------------------------------------------------------ */
+
+enum libra_display_mode {
+    LIBRA_DISPLAY_ASPECT  = 0,
+    LIBRA_DISPLAY_INTEGER = 1,
+    LIBRA_DISPLAY_STRETCH = 2
+};
+
+/* Convert a libretro frame buffer to RGBA8.
+ * pixel_format: 0=XRGB1555, 1=XRGB8888, 2=RGB565.
+ * pitch is the source row stride in bytes.
+ * dst must be at least w*h*4 bytes. */
+void libra_convert_to_rgba(const void *src, unsigned w, unsigned h,
+                           size_t pitch, int pixel_format,
+                           unsigned char *dst);
+
+/* Compute the display viewport rect for a game frame.
+ * Handles rotation, aspect ratio, integer scaling, and stretch modes.
+ * Output is in float pixel coordinates. */
+void libra_compute_viewport(unsigned win_w, unsigned win_h,
+                            unsigned rotation, float core_aspect,
+                            unsigned src_w, unsigned src_h,
+                            int display_mode,
+                            float *dst_x, float *dst_y,
+                            float *dst_w, float *dst_h);
+
+/* ---- Image loading (stb_image wrapper) ---------------------------------- */
+
+/* Load image from file path.  Always returns RGBA (4 channels).
+ * Caller must free with libra_image_free(). */
+unsigned char *libra_image_load(const char *path, int *w, int *h, int *channels);
+
+/* Load image from memory buffer.  Always returns RGBA. */
+unsigned char *libra_image_load_mem(const unsigned char *data, int len,
+                                    int *w, int *h, int *channels);
+
+/* Free image data returned by libra_image_load / libra_image_load_mem. */
+void libra_image_free(unsigned char *data);
+
 /* ---- Options menu state machine ----------------------------------------- */
 
 typedef struct libra_options_menu libra_options_menu_t;
