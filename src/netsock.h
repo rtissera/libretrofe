@@ -25,6 +25,7 @@
 #define CMD_NICK            0x0020u
 #define CMD_INFO            0x0022u
 #define CMD_SYNC            0x0023u
+#define CMD_SPECTATE        0x0024u
 #define CMD_PLAY            0x0025u
 #define CMD_MODE            0x0026u
 #define CMD_MODE_REFUSED    0x0027u
@@ -43,6 +44,12 @@
 /* MODE bits */
 #define MODE_BIT_YOU        (1u << 31)
 #define MODE_BIT_PLAYING    (1u << 30)
+
+/* MITM relay constants (interop values) */
+#define MITM_LINK_MAGIC    0x5241544Cu  /* "RATL" — host creates session */
+#define MITM_ADDR_MAGIC    0x52415441u  /* "RATA" — client joins session */
+#define MITM_MAGIC         0x52415453u  /* "RATS" — session ID magic prefix */
+#define MITM_ID_SIZE       16           /* 4-byte magic + 12-byte unique */
 
 /* -------------------------------------------------------------------------
  * Shared TCP helpers

@@ -33,4 +33,14 @@ bool     libra_rb_is_replay(const struct libra_rollback *rb);
 void     libra_rb_set_input_latency(struct libra_rollback *rb, unsigned frames);
 unsigned libra_rb_input_latency(const struct libra_rollback *rb);
 
+/* Relay (MITM) */
+bool libra_rb_host_relay(struct libra_rollback *rb,
+                          const char *relay_ip, uint16_t relay_port,
+                          uint8_t mitm_id_out[16],
+                          libra_net_message_cb_t msg_cb);
+bool libra_rb_join_relay(struct libra_rollback *rb,
+                          const char *relay_ip, uint16_t relay_port,
+                          const uint8_t mitm_id[16],
+                          libra_net_message_cb_t msg_cb);
+
 #endif /* LIBRA_ROLLBACK_H */

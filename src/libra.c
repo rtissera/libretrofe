@@ -1532,6 +1532,24 @@ unsigned libra_netplay_peer_count(libra_ctx_t *ctx)
     return libra_np_peer_count(ctx->netplay);
 }
 
+bool libra_netplay_spectate(libra_ctx_t *ctx)
+{
+    if (!ctx || !ctx->netplay) return false;
+    return libra_np_spectate(ctx->netplay);
+}
+
+bool libra_netplay_is_spectating(libra_ctx_t *ctx)
+{
+    if (!ctx || !ctx->netplay) return false;
+    return libra_np_is_spectating(ctx->netplay);
+}
+
+unsigned libra_netplay_spectator_count(libra_ctx_t *ctx)
+{
+    if (!ctx || !ctx->netplay) return 0;
+    return libra_np_spectator_count(ctx->netplay);
+}
+
 /* -------------------------------------------------------------------------
  * Rollback netplay (savestate-based)
  * ---------------------------------------------------------------------- */
@@ -1618,6 +1636,94 @@ unsigned libra_rollback_input_latency(libra_ctx_t *ctx)
 {
     if (!ctx || !ctx->rollback) return 0;
     return libra_rb_input_latency(ctx->rollback);
+}
+
+/* -------------------------------------------------------------------------
+ * Relay host/join wrappers
+ * ---------------------------------------------------------------------- */
+
+bool libra_netplay_host_relay(libra_ctx_t *ctx,
+                              const char *relay_ip, uint16_t relay_port,
+                              libra_mitm_id_t *session_out,
+                              libra_net_message_cb_t msg_cb)
+{
+    if (!ctx || !ctx->has_netpacket) return false;
+    ensure_netplay(ctx);
+    if (!ctx->netplay) return false;
+    s_active = ctx;
+    libra_environment_set_ctx(ctx);
+    return libra_np_host_relay(ctx->netplay, relay_ip, relay_port,
+                                session_out->data, msg_cb);
+}
+
+bool libra_netplay_join_relay(libra_ctx_t *ctx,
+                              const char *relay_ip, uint16_t relay_port,
+                              const libra_mitm_id_t *session,
+                              libra_net_message_cb_t msg_cb)
+{
+    if (!ctx || !ctx->has_netpacket || !session) return false;
+    ensure_netplay(ctx);
+    if (!ctx->netplay) return false;
+    s_active = ctx;
+    libra_environment_set_ctx(ctx);
+    return libra_np_join_relay(ctx->netplay, relay_ip, relay_port,
+                                session->data, msg_cb);
+}
+
+bool libra_rollback_host_relay(libra_ctx_t *ctx,
+                               const char *relay_ip, uint16_t relay_port,
+                               libra_mitm_id_t *session_out,
+                               libra_net_message_cb_t msg_cb)
+{
+    if (!ctx || !ctx->core || !ctx->game_loaded) return false;
+    if (libra_serialize_size(ctx) == 0) return false;
+    ensure_rollback(ctx);
+    if (!ctx->rollback) return false;
+    s_active = ctx;
+    libra_environment_set_ctx(ctx);
+    return libra_rb_host_relay(ctx->rollback, relay_ip, relay_port,
+                                session_out->data, msg_cb);
+}
+
+bool libra_rollback_join_relay(libra_ctx_t *ctx,
+                               const char *relay_ip, uint16_t relay_port,
+                               const libra_mitm_id_t *session,
+                               libra_net_message_cb_t msg_cb)
+{
+    if (!ctx || !ctx->core || !ctx->game_loaded || !session) return false;
+    if (libra_serialize_size(ctx) == 0) return false;
+    ensure_rollback(ctx);
+    if (!ctx->rollback) return false;
+    s_active = ctx;
+    libra_environment_set_ctx(ctx);
+    return libra_rb_join_relay(ctx->rollback, relay_ip, relay_port,
+                                session->data, msg_cb);
+}
+
+/* -------------------------------------------------------------------------
+ * MITM ID hex conversion
+ * ---------------------------------------------------------------------- */
+
+void libra_mitm_id_to_hex(const libra_mitm_id_t *id, char out[33])
+{
+    if (!id || !out) return;
+    for (int i = 0; i < 16; i++)
+        snprintf(out + i * 2, 3, "%02x", id->data[i]);
+    out[32] = '\0';
+}
+
+bool libra_mitm_id_from_hex(const char *hex, libra_mitm_id_t *id_out)
+{
+    if (!hex || !id_out) return false;
+    if (strlen(hex) != 32) return false;
+
+    for (int i = 0; i < 16; i++) {
+        unsigned val;
+        if (sscanf(hex + i * 2, "%2x", &val) != 1)
+            return false;
+        id_out->data[i] = (uint8_t)val;
+    }
+    return true;
 }
 
 /* -------------------------------------------------------------------------
@@ -1759,6 +1865,97 @@ void libra_save_options(libra_ctx_t *ctx, const char *path)
             fprintf(f, "%s = \"%s\"\n", key, val);
     }
     fclose(f);
+}
+
+unsigned libra_load_options_layered(libra_ctx_t *ctx,
+                                    const char *core_opt_path,
+                                    const char *game_opt_path)
+{
+    if (!ctx) return 0;
+    unsigned total = 0;
+    /* Load core defaults first, then game overrides on top */
+    total += libra_load_options(ctx, core_opt_path);
+    total += libra_load_options(ctx, game_opt_path);
+    return total;
+}
+
+void libra_save_options_game(libra_ctx_t *ctx,
+                             const char *core_opt_path,
+                             const char *game_opt_path)
+{
+    if (!ctx || !game_opt_path)
+        return;
+
+    unsigned total = ctx->opt_count;
+    if (total == 0) return;
+
+    /* Read core baseline values into a temporary map */
+    /* We re-use a simple array: key → value pairs from the core file */
+    char *core_vals[LIBRA_MAX_OPTIONS];
+    memset(core_vals, 0, sizeof(core_vals));
+
+    if (core_opt_path) {
+        FILE *f = fopen(core_opt_path, "r");
+        if (f) {
+            char line[1024];
+            while (fgets(line, sizeof(line), f)) {
+                int len = (int)strlen(line);
+                while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'
+                                   || line[len-1] == ' '))
+                    line[--len] = '\0';
+                if (line[0] == '#' || line[0] == '\0')
+                    continue;
+
+                char *eq = strchr(line, '=');
+                if (!eq) continue;
+
+                *eq = '\0';
+                char *key = line;
+                while (*key == ' ') key++;
+                char *kend = eq - 1;
+                while (kend > key && *kend == ' ') *kend-- = '\0';
+
+                char *val = eq + 1;
+                while (*val == ' ') val++;
+                int vlen = (int)strlen(val);
+                while (vlen > 0 && val[vlen-1] == ' ') val[--vlen] = '\0';
+                if (vlen >= 2 && val[0] == '"' && val[vlen-1] == '"') {
+                    val[vlen-1] = '\0';
+                    val++;
+                }
+
+                /* Find matching option index */
+                for (unsigned i = 0; i < total; i++) {
+                    if (ctx->opt_keys[i] && strcasecmp(ctx->opt_keys[i], key) == 0) {
+                        core_vals[i] = strdup(val);
+                        break;
+                    }
+                }
+            }
+            fclose(f);
+        }
+    }
+
+    /* Write only options that differ from core baseline */
+    FILE *out = fopen(game_opt_path, "w");
+    if (out) {
+        for (unsigned i = 0; i < total; i++) {
+            const char *key = ctx->opt_keys[i];
+            const char *val = ctx->opt_vals[i];
+            if (!key || !val) continue;
+
+            /* If core has a baseline and current matches, skip */
+            if (core_vals[i] && strcasecmp(val, core_vals[i]) == 0)
+                continue;
+
+            fprintf(out, "%s = \"%s\"\n", key, val);
+        }
+        fclose(out);
+    }
+
+    /* Free temp values */
+    for (unsigned i = 0; i < total; i++)
+        free(core_vals[i]);
 }
 
 /* -------------------------------------------------------------------------

@@ -103,6 +103,12 @@ if(BUILD_TESTS)
     add_subdirectory(test)
 endif()
 
+option(BUILD_RELAY "Build relay server tool" OFF)
+if(BUILD_RELAY)
+    add_executable(relay tools/relay.c)
+    target_compile_options(relay PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 include(GNUInstallDirs)
 install(TARGETS libra
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

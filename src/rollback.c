@@ -146,6 +146,85 @@ static unsigned device_word_count(unsigned device)
 }
 
 /* -------------------------------------------------------------------------
+ * Relay fd helpers
+ * ---------------------------------------------------------------------- */
+
+/* Connect to a relay server and return a TCP fd, or -1 on failure. */
+static int rb_relay_connect(struct libra_rollback *rb,
+                             const char *ip, uint16_t port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { rb_msg(rb, "Failed to create socket"); return -1; }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(port);
+    if (inet_pton(AF_INET, ip, &addr.sin_addr) != 1) {
+        rb_msg(rb, "Invalid relay IP"); close(fd); return -1;
+    }
+
+    netsock_set_nonblocking(fd);
+    int ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+    if (ret < 0 && errno != EINPROGRESS) {
+        rb_msg(rb, "Relay connection refused"); close(fd); return -1;
+    }
+    if (ret < 0) {
+        struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+        if (poll(&pfd, 1, 5000) <= 0) {
+            rb_msg(rb, "Relay connection timed out"); close(fd); return -1;
+        }
+        int err = 0;
+        socklen_t errlen = sizeof(err);
+        getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
+        if (err != 0) { rb_msg(rb, "Relay connection failed"); close(fd); return -1; }
+    }
+
+    netsock_set_nodelay(fd);
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    return fd;
+}
+
+static int rb_relay_create_session(struct libra_rollback *rb,
+                                    const char *ip, uint16_t port,
+                                    uint8_t mitm_id_out[MITM_ID_SIZE])
+{
+    int fd = rb_relay_connect(rb, ip, port);
+    if (fd < 0) return -1;
+
+    uint32_t magic = htonl(MITM_LINK_MAGIC);
+    if (!netsock_write_all(fd, &magic, 4)) {
+        rb_msg(rb, "Relay handshake failed"); close(fd); return -1;
+    }
+    if (!netsock_read_all(fd, mitm_id_out, MITM_ID_SIZE, 5000)) {
+        rb_msg(rb, "Relay handshake failed"); close(fd); return -1;
+    }
+    return fd;
+}
+
+static int rb_relay_join_session(struct libra_rollback *rb,
+                                  const char *ip, uint16_t port,
+                                  const uint8_t mitm_id[MITM_ID_SIZE])
+{
+    int fd = rb_relay_connect(rb, ip, port);
+    if (fd < 0) return -1;
+
+    uint32_t magic = htonl(MITM_ADDR_MAGIC);
+    if (!netsock_write_all(fd, &magic, 4)) {
+        rb_msg(rb, "Relay handshake failed"); close(fd); return -1;
+    }
+    if (!netsock_write_all(fd, mitm_id, MITM_ID_SIZE)) {
+        rb_msg(rb, "Relay handshake failed"); close(fd); return -1;
+    }
+    uint8_t echo[MITM_ID_SIZE];
+    if (!netsock_read_all(fd, echo, MITM_ID_SIZE, 5000)) {
+        rb_msg(rb, "Relay handshake failed"); close(fd); return -1;
+    }
+    return fd;
+}
+
+/* -------------------------------------------------------------------------
  * Ring buffer helpers
  * ---------------------------------------------------------------------- */
 
@@ -1032,9 +1111,6 @@ static bool rb_accept_peer(struct libra_rollback *rb)
     if (!rb_recv_play(rb, fd))             { close(fd); return false; }
     if (!rb_send_mode_accepted(rb, fd, 1, peer_nick)) { close(fd); return false; }
 
-    /* Switch to non-blocking */
-    netsock_set_nonblocking(fd);
-
     rb->peer_fd = fd;
     rb->connected = true;
     rb->protocol = proto;
@@ -1043,8 +1119,12 @@ static bool rb_accept_peer(struct libra_rollback *rb)
     close(rb->listen_fd);
     rb->listen_fd = -1;
 
-    /* Send initial savestate so client syncs */
-    rb->savestate_pending = true;
+    /* Send initial savestate synchronously so the client has correct state
+     * before libra_rb_run() is ever called. */
+    rb_send_savestate(rb, rb->self_frame);
+
+    /* Switch to non-blocking for data phase */
+    netsock_set_nonblocking(fd);
 
     rb_msgf(rb, "Player 2 connected: %s", peer_nick);
     return true;
@@ -1131,12 +1211,73 @@ bool libra_rb_join(struct libra_rollback *rb, const char *host_ip,
     if (!rb_send_play(rb, fd))  { close(fd); return false; }
     if (!rb_recv_mode(rb, fd))  { close(fd); return false; }
 
-    /* Switch to non-blocking */
-    netsock_set_nonblocking(fd);
-
     rb->peer_fd = fd;
     rb->connected = true;
     rb->protocol = proto;
+
+    /* Receive initial savestate from host (blocking, 10-second timeout).
+     * This ensures we start with the correct core state. */
+    {
+        uint32_t ss_hdr[2];
+        if (!netsock_read_all(fd, ss_hdr, 8, 10000)) {
+            rb_msg(rb, "Timeout waiting for host savestate");
+            /* Non-fatal: proceed without it (will desync-recover later) */
+            goto join_done;
+        }
+
+        uint32_t cmd = ntohl(ss_hdr[0]);
+        uint32_t sz  = ntohl(ss_hdr[1]);
+
+        if (cmd == CMD_LOAD_SAVESTATE && sz >= 12) {
+            uint32_t frame_n, orig_n, crc_n;
+            if (!netsock_read_all(fd, &frame_n, 4, 10000)) goto join_done;
+            if (!netsock_read_all(fd, &orig_n, 4, 10000))  goto join_done;
+            if (!netsock_read_all(fd, &crc_n, 4, 10000))   goto join_done;
+
+            uint32_t frame     = ntohl(frame_n);
+            uint32_t orig_size = ntohl(orig_n);
+            uint32_t comp_size = sz - 12;
+
+            void *comp_data = malloc(comp_size);
+            if (comp_data && netsock_read_all(fd, comp_data, comp_size, 10000)) {
+                void *state = malloc(orig_size);
+                if (state) {
+                    uLongf dest_len = orig_size;
+                    if (uncompress((Bytef *)state, &dest_len,
+                                   (const Bytef *)comp_data, comp_size) == Z_OK) {
+                        /* Check for NETPLAY1 container */
+                        size_t inner_size;
+                        const void *inner = netplay1_unwrap(state, dest_len, &inner_size);
+                        if (inner) {
+                            libra_environment_set_ctx(rb->ctx);
+                            libra_unserialize(rb->ctx, inner, inner_size);
+                        } else {
+                            libra_environment_set_ctx(rb->ctx);
+                            libra_unserialize(rb->ctx, state, dest_len);
+                        }
+                        rb->self_frame = frame;
+                        rb->peer_frame = frame;
+                        rb_msgf(rb, "Loaded host state at frame %u", frame);
+                    }
+                    free(state);
+                }
+            }
+            free(comp_data);
+        } else {
+            /* Not a savestate — skip payload (might be another command) */
+            uint8_t skip[256];
+            uint32_t remaining = sz;
+            while (remaining > 0) {
+                uint32_t chunk = remaining > sizeof(skip) ? sizeof(skip) : remaining;
+                if (!netsock_read_all(fd, skip, chunk, 5000)) break;
+                remaining -= chunk;
+            }
+        }
+    }
+
+join_done:
+    /* Switch to non-blocking for data phase */
+    netsock_set_nonblocking(fd);
 
     rb_msgf(rb, "Connected to host as Player %u", rb->client_id);
     return true;
@@ -1410,4 +1551,153 @@ void libra_rb_set_input_latency(struct libra_rollback *rb, unsigned frames)
 unsigned libra_rb_input_latency(const struct libra_rollback *rb)
 {
     return rb ? rb->input_latency : 0;
+}
+
+/* -------------------------------------------------------------------------
+ * Relay host/join (rollback mode over MITM tunnel)
+ * ---------------------------------------------------------------------- */
+
+bool libra_rb_host_relay(struct libra_rollback *rb,
+                          const char *relay_ip, uint16_t relay_port,
+                          uint8_t mitm_id_out[MITM_ID_SIZE],
+                          libra_net_message_cb_t msg_cb)
+{
+    if (!rb || !rb->ctx->core || !rb->ctx->game_loaded || !relay_ip) return false;
+    libra_rb_disconnect(rb);
+
+    rb->msg_cb  = msg_cb;
+    rb->is_host = true;
+    rb->client_id = 0;
+    rb->self_frame = 0;
+    rb->peer_frame = 0;
+    rb->local_port  = 0;
+    rb->remote_port = 1;
+    rb->state_alloc_size = libra_serialize_size(rb->ctx);
+
+    uint16_t port = relay_port ? relay_port : NP_DEFAULT_PORT;
+    rb_msgf(rb, "Connecting to relay %s:%u...", relay_ip, port);
+
+    int fd = rb_relay_create_session(rb, relay_ip, port, mitm_id_out);
+    if (fd < 0) return false;
+
+    rb_msg(rb, "Relay session created, waiting for peer...");
+
+    /* Now the relay fd will forward the client handshake to us.
+     * Perform server-side handshake on this fd (blocking). */
+    uint32_t proto;
+    char peer_nick[NP_NICK_LEN] = {0};
+    if (!rb_recv_header(rb, fd, &proto))     { close(fd); return false; }
+    if (!rb_send_header(rb, fd, proto))      { close(fd); return false; }
+    if (!rb_recv_nick(rb, fd, peer_nick))    { close(fd); return false; }
+    if (!rb_send_nick(rb, fd))               { close(fd); return false; }
+    if (!rb_send_info(rb, fd))               { close(fd); return false; }
+    if (!rb_recv_info(rb, fd))               { close(fd); return false; }
+    if (!rb_send_sync(rb, fd, 1, peer_nick)) { close(fd); return false; }
+    if (!rb_recv_play(rb, fd))               { close(fd); return false; }
+    if (!rb_send_mode_accepted(rb, fd, 1, peer_nick)) { close(fd); return false; }
+
+    rb->peer_fd = fd;
+    rb->connected = true;
+    rb->protocol = proto;
+
+    /* Send initial savestate synchronously */
+    rb_send_savestate(rb, rb->self_frame);
+
+    netsock_set_nonblocking(fd);
+
+    rb_msgf(rb, "Relay: peer connected: %s", peer_nick);
+    return true;
+}
+
+bool libra_rb_join_relay(struct libra_rollback *rb,
+                          const char *relay_ip, uint16_t relay_port,
+                          const uint8_t mitm_id[MITM_ID_SIZE],
+                          libra_net_message_cb_t msg_cb)
+{
+    if (!rb || !rb->ctx->core || !rb->ctx->game_loaded || !relay_ip || !mitm_id)
+        return false;
+    libra_rb_disconnect(rb);
+
+    rb->msg_cb  = msg_cb;
+    rb->is_host = false;
+    rb->local_port  = 1;
+    rb->remote_port = 0;
+    rb->state_alloc_size = libra_serialize_size(rb->ctx);
+
+    uint16_t port = relay_port ? relay_port : NP_DEFAULT_PORT;
+    rb_msgf(rb, "Joining relay %s:%u...", relay_ip, port);
+
+    int fd = rb_relay_join_session(rb, relay_ip, port, mitm_id);
+    if (fd < 0) return false;
+
+    /* Client handshake over relay tunnel */
+    if (!rb_send_header(rb, fd, NP_PROTO_LO)) { close(fd); return false; }
+    uint32_t proto;
+    if (!rb_recv_header(rb, fd, &proto))       { close(fd); return false; }
+    if (!rb_send_nick(rb, fd))                 { close(fd); return false; }
+    char host_nick[NP_NICK_LEN] = {0};
+    if (!rb_recv_nick(rb, fd, host_nick))      { close(fd); return false; }
+    if (!rb_recv_info(rb, fd))                 { close(fd); return false; }
+    if (!rb_send_info(rb, fd))                 { close(fd); return false; }
+    if (!rb_recv_sync(rb, fd))                 { close(fd); return false; }
+    if (!rb_send_play(rb, fd))                 { close(fd); return false; }
+    if (!rb_recv_mode(rb, fd))                 { close(fd); return false; }
+
+    rb->peer_fd = fd;
+    rb->connected = true;
+    rb->protocol = proto;
+
+    /* Receive initial savestate from host (blocking) */
+    {
+        uint32_t ss_hdr[2];
+        if (netsock_read_all(fd, ss_hdr, 8, 10000)) {
+            uint32_t cmd = ntohl(ss_hdr[0]);
+            uint32_t sz  = ntohl(ss_hdr[1]);
+            if (cmd == CMD_LOAD_SAVESTATE && sz >= 12) {
+                uint32_t frame_n, orig_n, crc_n;
+                if (netsock_read_all(fd, &frame_n, 4, 10000) &&
+                    netsock_read_all(fd, &orig_n, 4, 10000) &&
+                    netsock_read_all(fd, &crc_n, 4, 10000)) {
+                    uint32_t frame     = ntohl(frame_n);
+                    uint32_t orig_size = ntohl(orig_n);
+                    uint32_t comp_size = sz - 12;
+                    void *comp_data = malloc(comp_size);
+                    if (comp_data && netsock_read_all(fd, comp_data, comp_size, 10000)) {
+                        void *state = malloc(orig_size);
+                        if (state) {
+                            uLongf dest_len = orig_size;
+                            if (uncompress((Bytef *)state, &dest_len,
+                                           (const Bytef *)comp_data, comp_size) == Z_OK) {
+                                size_t inner_size;
+                                const void *inner = netplay1_unwrap(state, dest_len, &inner_size);
+                                libra_environment_set_ctx(rb->ctx);
+                                if (inner)
+                                    libra_unserialize(rb->ctx, inner, inner_size);
+                                else
+                                    libra_unserialize(rb->ctx, state, dest_len);
+                                rb->self_frame = frame;
+                                rb->peer_frame = frame;
+                                rb_msgf(rb, "Loaded host state at frame %u", frame);
+                            }
+                            free(state);
+                        }
+                    }
+                    free(comp_data);
+                }
+            } else {
+                /* Skip unknown command payload */
+                uint8_t skip[256];
+                uint32_t remaining = sz;
+                while (remaining > 0) {
+                    uint32_t chunk = remaining > sizeof(skip) ? sizeof(skip) : remaining;
+                    if (!netsock_read_all(fd, skip, chunk, 5000)) break;
+                    remaining -= chunk;
+                }
+            }
+        }
+    }
+
+    netsock_set_nonblocking(fd);
+    rb_msgf(rb, "Relay: connected to host as Player %u", rb->client_id);
+    return true;
 }

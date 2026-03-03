@@ -42,6 +42,7 @@ struct np_peer {
     int       fd;
     uint16_t  client_id;
     bool      playing;
+    bool      spectating;    /* observer only, receives but does not send */
     char      nick[NP_NICK_LEN];
     uint8_t   recv_buf[NP_RECV_BUF_SIZE];
     size_t    recv_len;
@@ -68,6 +69,7 @@ struct libra_netplay {
     int             peer_count;
 
     char our_nick[NP_NICK_LEN];
+    bool spectating;   /* we joined as spectator */
 };
 
 /* Global pointer for trampolines (only one netplay session at a time) */
@@ -136,9 +138,10 @@ static void RETRO_CALLCONV np_send_trampoline(
         /* Host → Client(s): pkt_client_id = source (us = 0) */
         hdr[2] = htonl(0);
         if (client_id == 0xFFFF) {
-            /* Broadcast to ALL playing peers */
+            /* Broadcast to ALL playing + spectating peers */
             for (int i = 0; i < np->peer_count; i++) {
-                if (np->peers[i] && np->peers[i]->playing) {
+                if (np->peers[i] && (np->peers[i]->playing ||
+                                      np->peers[i]->spectating)) {
                     write_all(np->peers[i]->fd, hdr, 12);
                     write_all(np->peers[i]->fd, buf, len);
                 }
@@ -474,7 +477,9 @@ static bool recv_mode(struct libra_netplay *np, int fd)
     memcpy(&mode_bits, payload + 4, 4);
     mode_bits = ntohl(mode_bits);
 
-    if (!(mode_bits & MODE_BIT_PLAYING)) {
+    /* If we asked to play but didn't get PLAYING, fail.
+     * If we asked to spectate, PLAYING clear is expected. */
+    if (!np->spectating && !(mode_bits & MODE_BIT_PLAYING)) {
         np_msg(np, "Server did not grant playing mode");
         return false;
     }
@@ -482,16 +487,45 @@ static bool recv_mode(struct libra_netplay *np, int fd)
     return true;
 }
 
-/* Host: receive PLAY command from client */
-static bool recv_play(struct libra_netplay *np, int fd)
+/* Client: send SPECTATE command */
+static bool send_spectate(struct libra_netplay *np, int fd)
 {
+    (void)np;
+    return write_cmd(fd, CMD_SPECTATE, NULL, 0);
+}
+
+/* Host: send MODE command for a spectator (YOU set, PLAYING clear) */
+static bool send_mode_spectator(struct libra_netplay *np, int fd,
+                                 uint32_t client_num, const char *nick)
+{
+    (void)np;
+    uint8_t payload[60];
+    memset(payload, 0, sizeof(payload));
+
+    uint32_t val = htonl(0);
+    memcpy(payload, &val, 4);
+
+    /* mode bits: YOU set, PLAYING clear, client_num */
+    val = htonl(MODE_BIT_YOU | client_num);
+    memcpy(payload + 4, &val, 4);
+
+    strncpy((char *)payload + 28, nick, NP_NICK_LEN - 1);
+    return write_cmd(fd, CMD_MODE, payload, sizeof(payload));
+}
+
+/* Host: receive PLAY or SPECTATE command from client.
+ * Sets *out_spectate = true if client sent SPECTATE. */
+static bool recv_play_or_spectate(struct libra_netplay *np, int fd,
+                                   bool *out_spectate)
+{
+    *out_spectate = false;
     uint32_t hdr[2];
     if (!read_all(fd, hdr, 8, 5000)) return false;
 
     uint32_t cmd = ntohl(hdr[0]);
     uint32_t sz  = ntohl(hdr[1]);
 
-    if (cmd != CMD_PLAY) {
+    if (cmd != CMD_PLAY && cmd != CMD_SPECTATE) {
         /* Could be something else — skip and retry once */
         uint8_t skip[256];
         while (sz > 0) {
@@ -503,11 +537,14 @@ static bool recv_play(struct libra_netplay *np, int fd)
         if (!read_all(fd, hdr, 8, 5000)) return false;
         cmd = ntohl(hdr[0]);
         sz  = ntohl(hdr[1]);
-        if (cmd != CMD_PLAY) {
-            np_msg(np, "Expected PLAY command from client");
+        if (cmd != CMD_PLAY && cmd != CMD_SPECTATE) {
+            np_msg(np, "Expected PLAY or SPECTATE command from client");
             return false;
         }
     }
+
+    if (cmd == CMD_SPECTATE)
+        *out_spectate = true;
 
     /* Skip payload */
     if (sz > 0) {
@@ -520,6 +557,101 @@ static bool recv_play(struct libra_netplay *np, int fd)
     }
 
     return true;
+}
+
+/* -------------------------------------------------------------------------
+ * Relay fd helpers
+ * ---------------------------------------------------------------------- */
+
+/* Connect to a relay server and return a TCP fd, or -1 on failure. */
+static int np_relay_connect(struct libra_netplay *np,
+                             const char *ip, uint16_t port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { np_msg(np, "Failed to create socket"); return -1; }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(port);
+    if (inet_pton(AF_INET, ip, &addr.sin_addr) != 1) {
+        np_msg(np, "Invalid relay IP"); close(fd); return -1;
+    }
+
+    set_nonblocking(fd);
+    int ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+    if (ret < 0 && errno != EINPROGRESS) {
+        np_msg(np, "Relay connection refused"); close(fd); return -1;
+    }
+    if (ret < 0) {
+        struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+        if (poll(&pfd, 1, 5000) <= 0) {
+            np_msg(np, "Relay connection timed out"); close(fd); return -1;
+        }
+        int err = 0;
+        socklen_t errlen = sizeof(err);
+        getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
+        if (err != 0) { np_msg(np, "Relay connection failed"); close(fd); return -1; }
+    }
+
+    set_nodelay(fd);
+    /* Make blocking for handshake */
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    return fd;
+}
+
+/* Host: connect to relay, send MITM_LINK_MAGIC, receive mitm_id.
+ * Returns connected fd, or -1 on failure. */
+static int np_relay_create_session(struct libra_netplay *np,
+                                    const char *ip, uint16_t port,
+                                    uint8_t mitm_id_out[MITM_ID_SIZE])
+{
+    int fd = np_relay_connect(np, ip, port);
+    if (fd < 0) return -1;
+
+    uint32_t magic = htonl(MITM_LINK_MAGIC);
+    if (!write_all(fd, &magic, 4)) {
+        np_msg(np, "Relay handshake failed (send LINK)");
+        close(fd); return -1;
+    }
+
+    if (!read_all(fd, mitm_id_out, MITM_ID_SIZE, 5000)) {
+        np_msg(np, "Relay handshake failed (recv session ID)");
+        close(fd); return -1;
+    }
+
+    return fd;
+}
+
+/* Client: connect to relay with known mitm_id.
+ * Returns connected fd, or -1 on failure. */
+static int np_relay_join_session(struct libra_netplay *np,
+                                  const char *ip, uint16_t port,
+                                  const uint8_t mitm_id[MITM_ID_SIZE])
+{
+    int fd = np_relay_connect(np, ip, port);
+    if (fd < 0) return -1;
+
+    uint32_t magic = htonl(MITM_ADDR_MAGIC);
+    if (!write_all(fd, &magic, 4)) {
+        np_msg(np, "Relay handshake failed (send ADDR)");
+        close(fd); return -1;
+    }
+
+    if (!write_all(fd, mitm_id, MITM_ID_SIZE)) {
+        np_msg(np, "Relay handshake failed (send session ID)");
+        close(fd); return -1;
+    }
+
+    /* Read echo of session ID as confirmation */
+    uint8_t echo[MITM_ID_SIZE];
+    if (!read_all(fd, echo, MITM_ID_SIZE, 5000)) {
+        np_msg(np, "Relay handshake failed (recv echo)");
+        close(fd); return -1;
+    }
+
+    return fd;
 }
 
 /* -------------------------------------------------------------------------
@@ -630,11 +762,12 @@ static bool dispatch_cmd(struct libra_netplay *np,
                         peer->recv_buf + *pos, sz, sender);
                 }
 
-                /* Relay to other peers */
+                /* Relay to other peers (including spectators) */
                 if (is_broadcast) {
                     for (int i = 0; i < np->peer_count; i++) {
                         if (np->peers[i] && np->peers[i] != peer &&
-                            np->peers[i]->playing) {
+                            (np->peers[i]->playing ||
+                             np->peers[i]->spectating)) {
                             relay_packet(np->peers[i]->fd, sender,
                                          peer->recv_buf + *pos, sz);
                         }
@@ -922,10 +1055,17 @@ bool libra_np_join(struct libra_netplay *np, const char *host_ip,
     /* 8. Start core */
     core_start(np);
 
-    /* 9. Send PLAY */
-    if (!send_play(np, fd)) {
-        np_msg(np, "Handshake failed (send play)");
-        goto fail;
+    /* 9. Send PLAY (or SPECTATE if we're joining as spectator) */
+    if (np->spectating) {
+        if (!send_spectate(np, fd)) {
+            np_msg(np, "Handshake failed (send spectate)");
+            goto fail;
+        }
+    } else {
+        if (!send_play(np, fd)) {
+            np_msg(np, "Handshake failed (send play)");
+            goto fail;
+        }
     }
 
     /* 10. Receive MODE */
@@ -934,8 +1074,11 @@ bool libra_np_join(struct libra_netplay *np, const char *host_ip,
     /* Switch to non-blocking for data phase */
     set_nonblocking(fd);
 
-    peer->playing = true;
-    np_msgf(np, "Connected to host as Player %u", np->client_id);
+    peer->playing = !np->spectating;
+    if (np->spectating)
+        np_msgf(np, "Spectating host (Player %u)", np->client_id);
+    else
+        np_msgf(np, "Connected to host as Player %u", np->client_id);
     return true;
 
 fail:
@@ -1013,40 +1156,56 @@ bool libra_np_poll(struct libra_netplay *np)
                 goto poll_data;
             }
 
-            /* 8. Receive PLAY */
-            if (!recv_play(np, fd)) {
+            /* 8. Receive PLAY or SPECTATE */
+            bool is_spectate = false;
+            if (!recv_play_or_spectate(np, fd, &is_spectate)) {
                 close(fd); free(peer);
                 goto poll_data;
             }
 
-            /* 9. Send MODE (accepted) */
-            if (!send_mode_accepted(np, fd, peer->client_id, peer->nick)) {
-                close(fd); free(peer);
-                goto poll_data;
+            /* 9. Send MODE (accepted or spectator) */
+            if (is_spectate) {
+                if (!send_mode_spectator(np, fd, peer->client_id, peer->nick)) {
+                    close(fd); free(peer);
+                    goto poll_data;
+                }
+            } else {
+                if (!send_mode_accepted(np, fd, peer->client_id, peer->nick)) {
+                    close(fd); free(peer);
+                    goto poll_data;
+                }
             }
 
-            /* 10. Notify core */
-            if (!core_connected(np, peer->client_id)) {
-                np_msg(np, "Core rejected connection");
-                close(fd); free(peer);
-                goto poll_data;
+            /* 10. Notify core (only for playing peers) */
+            if (!is_spectate) {
+                if (!core_connected(np, peer->client_id)) {
+                    np_msg(np, "Core rejected connection");
+                    close(fd); free(peer);
+                    goto poll_data;
+                }
             }
 
             /* Switch to non-blocking for data phase */
             set_nonblocking(fd);
 
-            peer->playing = true;
+            peer->playing    = !is_spectate;
+            peer->spectating = is_spectate;
             np->peers[np->peer_count++] = peer;
 
-            np_msgf(np, "Player %u connected: %s",
-                    peer->client_id, peer->nick);
+            if (is_spectate)
+                np_msgf(np, "Spectator %u connected: %s",
+                        peer->client_id, peer->nick);
+            else
+                np_msgf(np, "Player %u connected: %s",
+                        peer->client_id, peer->nick);
         }
     }
 
 poll_data:
-    /* Read and dispatch packets from all connected peers */
+    /* Read and dispatch packets from all connected peers (including spectators
+     * so we process DISCONNECT / PING from them) */
     for (int i = 0; i < np->peer_count; i++) {
-        if (np->peers[i] && np->peers[i]->playing)
+        if (np->peers[i] && (np->peers[i]->playing || np->peers[i]->spectating))
             read_and_dispatch_peer(np, np->peers[i]);
     }
 
@@ -1158,4 +1317,158 @@ unsigned libra_np_peer_count(const struct libra_netplay *np)
             count++;
     }
     return count;
+}
+
+bool libra_np_spectate(struct libra_netplay *np)
+{
+    if (!np) return false;
+    np->spectating = true;
+    return true;
+}
+
+bool libra_np_is_spectating(const struct libra_netplay *np)
+{
+    if (!np) return false;
+    return np->spectating;
+}
+
+unsigned libra_np_spectator_count(const struct libra_netplay *np)
+{
+    if (!np) return 0;
+    unsigned count = 0;
+    for (int i = 0; i < np->peer_count; i++) {
+        if (np->peers[i] && np->peers[i]->spectating)
+            count++;
+    }
+    return count;
+}
+
+/* -------------------------------------------------------------------------
+ * Relay host/join (netpacket mode over MITM tunnel)
+ * ---------------------------------------------------------------------- */
+
+bool libra_np_host_relay(struct libra_netplay *np,
+                          const char *relay_ip, uint16_t relay_port,
+                          uint8_t mitm_id_out[MITM_ID_SIZE],
+                          libra_net_message_cb_t msg_cb)
+{
+    if (!np || !np->ctx->has_netpacket || !relay_ip) return false;
+    libra_np_disconnect(np);
+
+    np->msg_cb = msg_cb;
+    np->is_host = true;
+    np->client_id = 0;
+    np->next_client_id = 1;
+
+    /* Connect to relay and create session */
+    int fd = np_relay_create_session(np, relay_ip,
+                relay_port ? relay_port : NP_DEFAULT_PORT,
+                mitm_id_out);
+    if (fd < 0) return false;
+
+    /* The relay fd acts as a listen-like fd: the next bytes
+     * will be the client's handshake (relayed through the MITM).
+     * We treat it as a direct accept-like connection. */
+
+    struct np_peer *peer = calloc(1, sizeof(*peer));
+    if (!peer) { close(fd); return false; }
+    peer->fd = fd;
+    peer->client_id = np->next_client_id++;
+
+    /* Handshake as host on the relay fd */
+    uint32_t proto;
+    if (!recv_header(np, fd, &proto))   { close(fd); free(peer); return false; }
+    if (!send_header(np, fd, proto))    { close(fd); free(peer); return false; }
+    if (!recv_nick(np, fd, peer->nick)) { close(fd); free(peer); return false; }
+    if (!send_nick(np, fd))             { close(fd); free(peer); return false; }
+    if (!send_info(np, fd))             { close(fd); free(peer); return false; }
+    if (!recv_info(np, fd))             { close(fd); free(peer); return false; }
+    if (!send_sync(np, fd, peer->client_id, peer->nick)) { close(fd); free(peer); return false; }
+
+    bool is_spectate = false;
+    if (!recv_play_or_spectate(np, fd, &is_spectate)) { close(fd); free(peer); return false; }
+
+    if (is_spectate) {
+        if (!send_mode_spectator(np, fd, peer->client_id, peer->nick)) { close(fd); free(peer); return false; }
+    } else {
+        if (!send_mode_accepted(np, fd, peer->client_id, peer->nick)) { close(fd); free(peer); return false; }
+    }
+
+    if (!is_spectate) {
+        if (!core_connected(np, peer->client_id)) {
+            np_msg(np, "Core rejected connection");
+            close(fd); free(peer); return false;
+        }
+    }
+
+    set_nonblocking(fd);
+    peer->playing = !is_spectate;
+    peer->spectating = is_spectate;
+    np->peers[np->peer_count++] = peer;
+
+    /* Start core session as host */
+    core_start(np);
+
+    np_msgf(np, "Relay: connected to peer via relay");
+    return true;
+}
+
+bool libra_np_join_relay(struct libra_netplay *np,
+                          const char *relay_ip, uint16_t relay_port,
+                          const uint8_t mitm_id[MITM_ID_SIZE],
+                          libra_net_message_cb_t msg_cb)
+{
+    if (!np || !np->ctx->has_netpacket || !relay_ip || !mitm_id) return false;
+    libra_np_disconnect(np);
+
+    np->msg_cb = msg_cb;
+    np->is_host = false;
+
+    int fd = np_relay_join_session(np, relay_ip,
+                relay_port ? relay_port : NP_DEFAULT_PORT,
+                mitm_id);
+    if (fd < 0) return false;
+
+    struct np_peer *peer = calloc(1, sizeof(*peer));
+    if (!peer) { close(fd); return false; }
+    peer->fd = fd;
+    peer->client_id = 0; /* host is 0 */
+    np->peers[0] = peer;
+    np->peer_count = 1;
+
+    /* Client handshake over relay tunnel */
+    if (!send_header(np, fd, NP_PROTO_LO))  goto fail;
+    uint32_t proto;
+    if (!recv_header(np, fd, &proto))       goto fail;
+    if (!send_nick(np, fd))                 goto fail;
+    if (!recv_nick(np, fd, peer->nick))     goto fail;
+    if (!recv_info(np, fd))                 goto fail;
+    if (!send_info(np, fd))                 goto fail;
+    if (!recv_sync(np, fd))                 goto fail;
+
+    core_start(np);
+
+    if (np->spectating) {
+        if (!send_spectate(np, fd))         goto fail;
+    } else {
+        if (!send_play(np, fd))             goto fail;
+    }
+    if (!recv_mode(np, fd))                 goto fail;
+
+    set_nonblocking(fd);
+    peer->playing = !np->spectating;
+
+    if (np->spectating)
+        np_msg(np, "Relay: spectating via relay");
+    else
+        np_msgf(np, "Relay: connected as Player %u via relay", np->client_id);
+    return true;
+
+fail:
+    core_stop(np);
+    close(fd);
+    free(peer);
+    np->peers[0] = NULL;
+    np->peer_count = 0;
+    return false;
 }

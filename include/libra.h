@@ -310,6 +310,40 @@ uint16_t libra_netplay_client_id(libra_ctx_t *ctx);
 /* Number of playing peers (excludes ourselves). */
 unsigned libra_netplay_peer_count(libra_ctx_t *ctx);
 
+/* Spectate mode (observer joins but cannot control game) */
+bool     libra_netplay_spectate(libra_ctx_t *ctx);
+bool     libra_netplay_is_spectating(libra_ctx_t *ctx);
+unsigned libra_netplay_spectator_count(libra_ctx_t *ctx);
+
+/* ---- MITM Relay -------------------------------------------------------- */
+
+/* Relay session ID type */
+typedef struct { uint8_t data[16]; } libra_mitm_id_t;
+
+/* Netpacket mode — relay variants */
+bool libra_netplay_host_relay(libra_ctx_t *ctx,
+                              const char *relay_ip, uint16_t relay_port,
+                              libra_mitm_id_t *session_out,
+                              libra_net_message_cb_t msg_cb);
+bool libra_netplay_join_relay(libra_ctx_t *ctx,
+                              const char *relay_ip, uint16_t relay_port,
+                              const libra_mitm_id_t *session,
+                              libra_net_message_cb_t msg_cb);
+
+/* Rollback mode — relay variants */
+bool libra_rollback_host_relay(libra_ctx_t *ctx,
+                               const char *relay_ip, uint16_t relay_port,
+                               libra_mitm_id_t *session_out,
+                               libra_net_message_cb_t msg_cb);
+bool libra_rollback_join_relay(libra_ctx_t *ctx,
+                               const char *relay_ip, uint16_t relay_port,
+                               const libra_mitm_id_t *session,
+                               libra_net_message_cb_t msg_cb);
+
+/* Utility: convert mitm_id to/from 32-char hex string for UI display */
+void libra_mitm_id_to_hex(const libra_mitm_id_t *id, char out[33]);
+bool libra_mitm_id_from_hex(const char *hex, libra_mitm_id_t *id_out);
+
 /* ---- Rollback netplay (savestate-based, wire-compatible with RetroArch) --
  *
  * For cores that support serialization but NOT the netpacket interface.
@@ -349,6 +383,18 @@ unsigned libra_load_cheats(libra_ctx_t *ctx, const char *path);
  * Format: key = "value" (one per line, # comments supported). */
 unsigned libra_load_options(libra_ctx_t *ctx, const char *path);
 void     libra_save_options(libra_ctx_t *ctx, const char *path);
+
+/* Load options with two-layer override: core file first, game file second.
+ * Returns total number of options applied from both files. */
+unsigned libra_load_options_layered(libra_ctx_t *ctx,
+                                    const char *core_opt_path,
+                                    const char *game_opt_path);
+
+/* Save only options whose values differ from those in core_opt_path.
+ * Writes the game-specific delta to game_opt_path. */
+void libra_save_options_game(libra_ctx_t *ctx,
+                             const char *core_opt_path,
+                             const char *game_opt_path);
 
 /* Resolve an m3u playlist entry.  If path is not an .m3u file, copies path
  * to out unchanged.  Returns true on success, false if disc_index is out of
