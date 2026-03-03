@@ -76,14 +76,11 @@ bool libra_glsl_split(const char *source, size_t len,
     const char *version_line,
     char *vs_out, size_t vs_size, char *fs_out, size_t fs_size);
 
-/* Transpile .slang (Vulkan GLSL) -> plain GLSL.  Operations:
- *   - Split on #pragma stage vertex / fragment
- *   - Strip layout(...) qualifiers
- *   - Flatten push_constant / UBO blocks to individual uniforms
- *   - If is_gles2: in->attribute/varying, texture()->texture2D(), etc.
- * version_line is prepended. */
-bool libra_slang_to_glsl(const char *source, size_t len,
-    const char *version_line, bool is_gles2,
+/* Compile .slang via SPIR-V pipeline -> target GLSL.
+ * gl_version: 130 (desktop GL), 300 (GLES 3.0), etc.
+ * Output includes #version directive — no wrapping needed. */
+bool libra_slang_compile(const char *source, size_t len,
+    int gl_version, bool is_es,
     char *vs_out, size_t vs_size, char *fs_out, size_t fs_size);
 
 #ifdef __cplusplus
