@@ -210,46 +210,101 @@ unsigned libra_shader_extract_params(const char *source,
 /* Preset parser                                                              */
 /* ========================================================================= */
 
+#define LIBRA_PRESET_MAX_DEPTH 8
+
+static bool preset_load_internal(libra_shader_preset_t *out, const char *path, int depth);
+
 bool libra_shader_preset_load(libra_shader_preset_t *out, const char *path)
 {
+    return preset_load_internal(out, path, 0);
+}
+
+static bool preset_load_internal(libra_shader_preset_t *out, const char *path, int depth)
+{
     if (!out || !path) return false;
-    memset(out, 0, sizeof(*out));
+    if (depth > LIBRA_PRESET_MAX_DEPTH) {
+        fprintf(stderr, "[shader] #reference depth exceeds %d\n", LIBRA_PRESET_MAX_DEPTH);
+        return false;
+    }
 
     /* Determine base directory */
+    char base_dir[512];
     {
         const char *last_slash = strrchr(path, '/');
         if (last_slash) {
             size_t len = (size_t)(last_slash - path);
-            if (len >= sizeof(out->base_dir))
-                len = sizeof(out->base_dir) - 1;
-            memcpy(out->base_dir, path, len);
-            out->base_dir[len] = '\0';
+            if (len >= sizeof(base_dir))
+                len = sizeof(base_dir) - 1;
+            memcpy(base_dir, path, len);
+            base_dir[len] = '\0';
         } else {
-            snprintf(out->base_dir, sizeof(out->base_dir), ".");
+            snprintf(base_dir, sizeof(base_dir), ".");
         }
     }
 
-    /* Set defaults for all passes */
-    for (int i = 0; i < LIBRA_SHADER_MAX_PASSES; i++) {
-        out->passes[i].filter_linear = -1; /* unset */
-        out->passes[i].scale_x = 1.0f;
-        out->passes[i].scale_y = 1.0f;
-        out->passes[i].scale_type_x = LIBRA_SCALE_SOURCE;
-        out->passes[i].scale_type_y = LIBRA_SCALE_SOURCE;
+    /* First pass: scan for #reference directive.
+     * If found, recursively load the referenced preset as our base. */
+    bool have_base = false;
+    {
+        FILE *rf = fopen(path, "r");
+        if (!rf) return false;
+        char rline[2048];
+        while (fgets(rline, sizeof(rline), rf)) {
+            trim_line(rline);
+            if (strncmp(rline, "#reference", 10) != 0) continue;
+            const char *rp = rline + 10;
+            while (*rp == ' ' || *rp == '\t') rp++;
+            /* Strip quotes */
+            size_t rlen = strlen(rp);
+            if (rlen >= 2 && rp[0] == '"' && rp[rlen-1] == '"') {
+                rp++;
+                rlen -= 2;
+            }
+            if (rlen == 0) continue;
+            char ref_rel[512];
+            snprintf(ref_rel, sizeof(ref_rel), "%.*s", (int)rlen, rp);
+            char ref_path[1024];
+            resolve_path(ref_path, sizeof(ref_path), base_dir, ref_rel);
+            if (!preset_load_internal(out, ref_path, depth + 1)) {
+                fclose(rf);
+                return false;
+            }
+            have_base = true;
+            break; /* only one #reference per file */
+        }
+        fclose(rf);
     }
 
-    /* Temporary LUT names for matching properties */
+    if (!have_base) {
+        memset(out, 0, sizeof(*out));
+        /* Set defaults for all passes */
+        for (int i = 0; i < LIBRA_SHADER_MAX_PASSES; i++) {
+            out->passes[i].filter_linear = -1; /* unset */
+            out->passes[i].scale_x = 1.0f;
+            out->passes[i].scale_y = 1.0f;
+            out->passes[i].scale_type_x = LIBRA_SCALE_SOURCE;
+            out->passes[i].scale_type_y = LIBRA_SCALE_SOURCE;
+        }
+    }
+
+    /* Set base_dir to THIS file's directory (paths are relative to this file) */
+    snprintf(out->base_dir, sizeof(out->base_dir), "%s", base_dir);
+
+    /* Temporary LUT names for matching properties — rebuild from existing LUTs */
     char lut_names[LIBRA_SHADER_MAX_LUTS][64];
     memset(lut_names, 0, sizeof(lut_names));
+    for (unsigned i = 0; i < out->lut_count; i++)
+        snprintf(lut_names[i], 64, "%s", out->luts[i].name);
 
     FILE *f = fopen(path, "r");
-    if (!f) return false;
+    if (!f) return !have_base ? false : true;
 
     char line[2048];
     while (fgets(line, sizeof(line), f)) {
         trim_line(line);
-        if (line[0] == '#' || line[0] == '\0')
-            continue;
+        /* Skip #reference (already handled), other # comments, empty lines */
+        if (line[0] == '\0') continue;
+        if (line[0] == '#') continue;
 
         char *key, *val;
         if (!parse_kv(line, &key, &val))
@@ -265,6 +320,11 @@ bool libra_shader_preset_load(libra_shader_preset_t *out, const char *path)
 
         /* textures = "name1;name2" */
         if (strcmp(key, "textures") == 0) {
+            /* Child preset overrides base's texture list */
+            if (have_base) {
+                out->lut_count = 0;
+                memset(lut_names, 0, sizeof(lut_names));
+            }
             char tmp[512];
             snprintf(tmp, sizeof(tmp), "%s", val);
             char *tok = strtok(tmp, ";");
@@ -365,6 +425,22 @@ bool libra_shader_preset_load(libra_shader_preset_t *out, const char *path)
                 idx = atoi(key + 12);
                 if (idx >= 0 && idx < (int)out->pass_count)
                     out->passes[idx].mipmap_input = (strcmp(val, "true") == 0 || atoi(val) != 0) ? 1 : 0;
+                continue;
+            }
+
+            /* float_framebuffer<N> */
+            if (strncmp(key, "float_framebuffer", 17) == 0 && isdigit((unsigned char)key[17])) {
+                idx = atoi(key + 17);
+                if (idx >= 0 && idx < (int)out->pass_count)
+                    out->passes[idx].float_framebuffer = (strcmp(val, "true") == 0 || atoi(val) != 0) ? 1 : 0;
+                continue;
+            }
+
+            /* srgb_framebuffer<N> */
+            if (strncmp(key, "srgb_framebuffer", 16) == 0 && isdigit((unsigned char)key[16])) {
+                idx = atoi(key + 16);
+                if (idx >= 0 && idx < (int)out->pass_count)
+                    out->passes[idx].srgb_framebuffer = (strcmp(val, "true") == 0 || atoi(val) != 0) ? 1 : 0;
                 continue;
             }
 

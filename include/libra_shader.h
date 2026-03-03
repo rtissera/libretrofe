@@ -33,6 +33,8 @@ typedef struct {
     float scale_x, scale_y;   /* default 1.0 */
     int   wrap_mode;
     int   mipmap_input;
+    int   float_framebuffer;
+    int   srgb_framebuffer;
     int   frame_count_mod;     /* 0 = no wrapping */
     char  alias[64];
 } libra_shader_pass_t;
@@ -78,10 +80,15 @@ bool libra_glsl_split(const char *source, size_t len,
 
 /* Compile .slang via SPIR-V pipeline -> target GLSL.
  * gl_version: 130 (desktop GL), 300 (GLES 3.0), etc.
+ * base_dir: directory for resolving #include "file" (NULL to skip).
+ * fmt_out/fmt_size: if non-NULL, receives the #pragma format string (e.g.
+ *   "R16G16B16A16_SFLOAT"). Empty string if no #pragma format found.
  * Output includes #version directive — no wrapping needed. */
 bool libra_slang_compile(const char *source, size_t len,
+    const char *base_dir,
     int gl_version, bool is_es,
-    char *vs_out, size_t vs_size, char *fs_out, size_t fs_size);
+    char *vs_out, size_t vs_size, char *fs_out, size_t fs_size,
+    char *fmt_out, size_t fmt_size);
 
 #ifdef __cplusplus
 }

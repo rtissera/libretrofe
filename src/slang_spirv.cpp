@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: MIT
  *
  * SPIR-V pipeline for .slang shader compilation:
- *   .slang source → preprocess → glslang → SPIR-V → SPIRV-Cross → target GLSL
+ *   .slang source → expand #include → preprocess → glslang → SPIR-V →
+ *   SPIRV-Cross → target GLSL
  */
 
 #include "libra_shader.h"
@@ -17,6 +18,7 @@
 #include <vector>
 
 #define TAG "[slang_spirv] "
+#define MAX_INCLUDE_DEPTH 16
 
 /* ── glslang process init (ref-counted) ──────────────────────────── */
 
@@ -34,10 +36,107 @@ static void release_glslang(void)
         glslang_finalize_process();
 }
 
+/* ── #include expansion ─────────────────────────────────────────── */
+
+static std::string dir_of(const std::string &path)
+{
+    size_t pos = path.rfind('/');
+    if (pos == std::string::npos) return ".";
+    return path.substr(0, pos);
+}
+
+static std::string read_file_str(const std::string &path)
+{
+    FILE *f = fopen(path.c_str(), "rb");
+    if (!f) return {};
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return {}; }
+    fseek(f, 0, SEEK_SET);
+    std::string buf((size_t)sz, '\0');
+    size_t rd = fread(&buf[0], 1, (size_t)sz, f);
+    fclose(f);
+    buf.resize(rd);
+    return buf;
+}
+
+static bool expand_includes(const std::string &source,
+                             const std::string &base_dir,
+                             std::string &out,
+                             int depth)
+{
+    if (depth > MAX_INCLUDE_DEPTH) {
+        fprintf(stderr, TAG "#include depth exceeds %d — possible cycle\n",
+                MAX_INCLUDE_DEPTH);
+        return false;
+    }
+
+    out.clear();
+    out.reserve(source.size());
+
+    const char *p = source.c_str();
+    const char *end = p + source.size();
+
+    while (p < end) {
+        const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
+        if (!nl) nl = end;
+        size_t line_len = (size_t)(nl - p);
+
+        /* Skip leading whitespace for #include detection */
+        const char *tp = p;
+        while (tp < nl && (*tp == ' ' || *tp == '\t')) tp++;
+
+        bool handled = false;
+
+        if (strncmp(tp, "#include", 8) == 0) {
+            const char *q = tp + 8;
+            while (q < nl && (*q == ' ' || *q == '\t')) q++;
+            if (q < nl && *q == '"') {
+                q++;
+                const char *qe = (const char *)memchr(q, '"', (size_t)(nl - q));
+                if (qe) {
+                    std::string inc_path(q, (size_t)(qe - q));
+                    std::string full_path;
+                    if (!inc_path.empty() && inc_path[0] == '/')
+                        full_path = inc_path;
+                    else
+                        full_path = base_dir + "/" + inc_path;
+
+                    std::string inc_src = read_file_str(full_path);
+                    if (inc_src.empty()) {
+                        fprintf(stderr, TAG "cannot open #include \"%s\" (resolved: %s)\n",
+                                inc_path.c_str(), full_path.c_str());
+                        return false;
+                    }
+
+                    std::string expanded;
+                    if (!expand_includes(inc_src, dir_of(full_path),
+                                          expanded, depth + 1))
+                        return false;
+
+                    out += expanded;
+                    if (!out.empty() && out.back() != '\n')
+                        out += '\n';
+                    handled = true;
+                }
+            }
+        }
+
+        if (!handled) {
+            out.append(p, (nl < end) ? line_len + 1 : line_len);
+        }
+
+        p = (nl < end) ? nl + 1 : end;
+    }
+
+    return true;
+}
+
 /* ── Preprocess .slang source ────────────────────────────────────── */
 
 static bool preprocess_slang(const char *source, size_t len,
-                             std::string &vs_out, std::string &fs_out)
+                             std::string &vs_out, std::string &fs_out,
+                             std::string &fmt_out)
 {
     const char *end = source + len;
 
@@ -46,6 +145,7 @@ static bool preprocess_slang(const char *source, size_t len,
     std::vector<Span> common_lines, vs_lines, fs_lines;
     std::vector<Span> *current = &common_lines;
     bool found_vs = false, found_fs = false;
+    fmt_out.clear();
 
     const char *p = source;
     while (p < end) {
@@ -77,7 +177,16 @@ static bool preprocess_slang(const char *source, size_t len,
         if (!skip && strncmp(tp, "#version", 8) == 0)           skip = true;
         if (!skip && strncmp(tp, "#pragma parameter", 17) == 0) skip = true;
         if (!skip && strncmp(tp, "#pragma name", 12) == 0)      skip = true;
-        if (!skip && strncmp(tp, "#pragma format", 14) == 0)    skip = true;
+        if (!skip && strncmp(tp, "#pragma format", 14) == 0) {
+            /* Capture the format string (e.g. R16G16B16A16_SFLOAT) */
+            const char *fq = tp + 14;
+            while (fq < nl && (*fq == ' ' || *fq == '\t')) fq++;
+            const char *fe = fq;
+            while (fe < nl && *fe != ' ' && *fe != '\t' && *fe != '\r') fe++;
+            if (fe > fq)
+                fmt_out.assign(fq, (size_t)(fe - fq));
+            skip = true;
+        }
 
         if (!skip) {
             size_t copy_len = (nl < end) ? line_len + 1 : line_len;
@@ -229,18 +338,44 @@ static bool spirv_to_glsl(const std::vector<uint32_t> &spirv,
 /* ── Public API ──────────────────────────────────────────────────── */
 
 extern "C" bool libra_slang_compile(const char *source, size_t len,
+                                    const char *base_dir,
                                     int gl_version, bool is_es,
                                     char *vs_out, size_t vs_size,
-                                    char *fs_out, size_t fs_size)
+                                    char *fs_out, size_t fs_size,
+                                    char *fmt_out, size_t fmt_size)
 {
     ensure_glslang_init();
 
+    /* 0. Expand #include directives (before pragma splitting) */
+    std::string expanded_src;
+    const char *src_ptr = source;
+    size_t src_len = len;
+
+    if (base_dir && base_dir[0]) {
+        if (!expand_includes(std::string(source, len), base_dir,
+                              expanded_src, 0)) {
+            fprintf(stderr, TAG "#include expansion failed\n");
+            release_glslang();
+            return false;
+        }
+        src_ptr = expanded_src.c_str();
+        src_len = expanded_src.size();
+    }
+
     /* 1. Preprocess: split on #pragma stage, build per-stage Vulkan GLSL */
-    std::string vs_vulkan, fs_vulkan;
-    if (!preprocess_slang(source, len, vs_vulkan, fs_vulkan)) {
+    std::string vs_vulkan, fs_vulkan, fmt_str;
+    if (!preprocess_slang(src_ptr, src_len, vs_vulkan, fs_vulkan, fmt_str)) {
         fprintf(stderr, TAG "preprocess failed (no #pragma stage found)\n");
         release_glslang();
         return false;
+    }
+
+    /* Copy format string if caller wants it */
+    if (fmt_out && fmt_size > 0) {
+        if (fmt_str.size() + 1 <= fmt_size)
+            memcpy(fmt_out, fmt_str.c_str(), fmt_str.size() + 1);
+        else
+            fmt_out[0] = '\0';
     }
 
     /* 2. Compile each stage to SPIR-V */
