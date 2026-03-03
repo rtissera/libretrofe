@@ -1,0 +1,93 @@
+/* SPDX-License-Identifier: MIT */
+#ifndef LIBRA_SHADER_H
+#define LIBRA_SHADER_H
+
+#include <stdbool.h>
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define LIBRA_SHADER_MAX_PASSES  16
+#define LIBRA_SHADER_MAX_LUTS     8
+#define LIBRA_SHADER_MAX_PARAMS  64
+
+enum libra_scale_type {
+    LIBRA_SCALE_SOURCE   = 0,
+    LIBRA_SCALE_VIEWPORT = 1,
+    LIBRA_SCALE_ABSOLUTE = 2
+};
+
+enum libra_wrap_mode {
+    LIBRA_WRAP_CLAMP    = 0,
+    LIBRA_WRAP_REPEAT   = 1,
+    LIBRA_WRAP_MIRRORED = 2
+};
+
+typedef struct {
+    char  path[512];           /* resolved absolute path to .glsl/.slang */
+    int   filter_linear;       /* 1=linear, 0=nearest, -1=unset (default linear) */
+    int   scale_type_x;
+    int   scale_type_y;
+    float scale_x, scale_y;   /* default 1.0 */
+    int   wrap_mode;
+    int   mipmap_input;
+    int   frame_count_mod;     /* 0 = no wrapping */
+    char  alias[64];
+} libra_shader_pass_t;
+
+typedef struct {
+    char name[64];             /* sampler name in shader source */
+    char path[512];
+    int  filter_linear;
+    int  mipmap;
+    int  wrap_mode;
+} libra_shader_lut_t;
+
+typedef struct {
+    char  id[64];
+    char  label[128];
+    float value, def, minimum, maximum, step;
+} libra_shader_param_t;
+
+typedef struct {
+    int      is_slang;         /* 0=glsl, 1=slang (detected from shader0 extension) */
+    unsigned pass_count;
+    libra_shader_pass_t  passes[LIBRA_SHADER_MAX_PASSES];
+    unsigned lut_count;
+    libra_shader_lut_t   luts[LIBRA_SHADER_MAX_LUTS];
+    unsigned param_count;
+    libra_shader_param_t params[LIBRA_SHADER_MAX_PARAMS];
+    char     base_dir[512];
+} libra_shader_preset_t;
+
+/* Parse a .glslp or .slangp preset file.  Resolves relative paths. */
+bool libra_shader_preset_load(libra_shader_preset_t *out, const char *path);
+
+/* Extract #pragma parameter lines from shader source into params[].
+ * Returns number of parameters found. */
+unsigned libra_shader_extract_params(const char *source,
+    libra_shader_param_t *params, unsigned max);
+
+/* Split a .glsl source into VS and FS by prepending #define VERTEX/FRAGMENT.
+ * version_line is prepended (e.g. "#version 100\n"). */
+bool libra_glsl_split(const char *source, size_t len,
+    const char *version_line,
+    char *vs_out, size_t vs_size, char *fs_out, size_t fs_size);
+
+/* Transpile .slang (Vulkan GLSL) -> plain GLSL.  Operations:
+ *   - Split on #pragma stage vertex / fragment
+ *   - Strip layout(...) qualifiers
+ *   - Flatten push_constant / UBO blocks to individual uniforms
+ *   - If is_gles2: in->attribute/varying, texture()->texture2D(), etc.
+ * version_line is prepended. */
+bool libra_slang_to_glsl(const char *source, size_t len,
+    const char *version_line, bool is_gles2,
+    char *vs_out, size_t vs_size, char *fs_out, size_t fs_size);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* LIBRA_SHADER_H */

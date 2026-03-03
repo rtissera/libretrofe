@@ -19,6 +19,7 @@ add_library(libra
     src/netsock.c
     src/rollback.c
     src/rewind.c
+    src/shader.c
     deps/miniz.c
     deps/zstd.c
 )
