@@ -628,7 +628,7 @@ static bool preset_load_internal(libra_shader_preset_t *out, const char *path, i
 
 bool libra_glsl_split(const char *source, size_t len,
     const char *version_line,
-    bool is_gles,
+    int gles_version,
     char *vs_out, size_t vs_size, char *fs_out, size_t fs_size)
 {
     if (!source || !vs_out || !fs_out || vs_size < 256 || fs_size < 256)
@@ -658,8 +658,11 @@ bool libra_glsl_split(const char *source, size_t len,
 
     /* Determine the version line to use */
     const char *ver;
-    if (is_gles) {
+    if (gles_version >= 300) {
         ver = "#version 300 es\nprecision mediump float;\n";
+    } else if (gles_version > 0) {
+        /* GLES 2.0: #version 100 is implicit, just add precision */
+        ver = "precision mediump float;\n";
     } else if (extracted_version[0]) {
         ver = extracted_version;
     } else if (version_line && version_line[0]) {
@@ -678,8 +681,8 @@ bool libra_glsl_split(const char *source, size_t len,
     vp = sappend_str(vs_out, vp, vs_size, "#define VERTEX\n#define PARAMETER_UNIFORM\n");
     fp = sappend_str(fs_out, fp, fs_size, "#define FRAGMENT\n#define PARAMETER_UNIFORM\n");
 
-    /* GLES keyword remapping */
-    if (is_gles) {
+    /* GLES 3.0+ keyword remapping (attribute/varying → in/out, texture2D → texture) */
+    if (gles_version >= 300) {
         vp = sappend_str(vs_out, vp, vs_size,
             "#define attribute in\n"
             "#define varying out\n"
@@ -697,6 +700,7 @@ bool libra_glsl_split(const char *source, size_t len,
                 "out vec4 FragColor;\n");
         }
     }
+    /* GLES 2.0: attribute/varying/texture2D/gl_FragColor are native — no remapping */
 
     /* Copy source, skipping #version lines (already prepended) and
      * #pragma parameter lines (not needed in compiled shader) */
