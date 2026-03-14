@@ -92,12 +92,27 @@ static char *build_val_list(const struct retro_core_option_value *values)
     return pos > 0 ? strdup(buf) : NULL;
 }
 
-/* Log callback forwarded to stderr */
+/* Log callback: routes through host-provided callback or falls back to stderr */
 static void log_printf(enum retro_log_level level, const char *fmt, ...)
 {
-    const char *prefix;
+    char buf[2048];
     va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
 
+    /* Strip trailing newline — cores often add one; our callers don't expect it */
+    size_t len = strlen(buf);
+    if (len > 0 && buf[len - 1] == '\n')
+        buf[len - 1] = '\0';
+
+    if (s_ctx && s_ctx->config.log) {
+        s_ctx->config.log(s_ctx->config.userdata, (int)level, buf);
+        return;
+    }
+
+    /* Fallback: stderr */
+    const char *prefix;
     switch (level) {
         case RETRO_LOG_DEBUG: prefix = "[DEBUG]"; break;
         case RETRO_LOG_INFO:  prefix = "[INFO] "; break;
@@ -105,11 +120,7 @@ static void log_printf(enum retro_log_level level, const char *fmt, ...)
         case RETRO_LOG_ERROR: prefix = "[ERROR]"; break;
         default:              prefix = "[?]    "; break;
     }
-
-    fprintf(stderr, "libra %s ", prefix);
-    va_start(args, fmt);
-    vfprintf(stderr, fmt, args);
-    va_end(args);
+    fprintf(stderr, "libra %s %s\n", prefix, buf);
 }
 
 /* Hardware rendering trampolines */

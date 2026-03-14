@@ -38,6 +38,18 @@ typedef bool    (*libra_mic_set_state_cb_t)(void *ud, void *mic, bool active);
 typedef bool    (*libra_mic_get_state_cb_t)(void *ud, const void *mic);
 typedef int     (*libra_mic_read_cb_t)(void *ud, void *mic, int16_t *samples, size_t num_samples);
 
+/* Host log callback — replaces default stderr output when set.
+ * level: 0=debug 1=info 2=warn 3=error  message is pre-formatted (no newline). */
+typedef void (*libra_log_cb_t)(void *ud, int level, const char *message);
+
+/* Host leaderboard-submitted callback — called when the server confirms a
+ * leaderboard entry (hardcore mode only, per RetroAchievements policy).
+ * All strings are valid only for the duration of the call. */
+typedef void (*libra_leaderboard_submitted_cb_t)(void *ud,
+                  uint32_t leaderboard_id, const char *title,
+                  const char *formatted_score, uint32_t new_rank,
+                  uint32_t num_entries);
+
 typedef struct {
     libra_video_cb_t       video;
     libra_audio_cb_t       audio;
@@ -52,6 +64,8 @@ typedef struct {
     libra_mic_set_state_cb_t mic_set_state;
     libra_mic_get_state_cb_t mic_get_state;
     libra_mic_read_cb_t    mic_read;
+    libra_log_cb_t         log;             /* optional; NULL = stderr */
+    libra_leaderboard_submitted_cb_t leaderboard_submitted; /* optional */
     void                  *userdata;
     unsigned               audio_output_rate;  /* target rate Hz, e.g. 48000 */
 } libra_config_t;
