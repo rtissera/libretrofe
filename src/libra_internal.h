@@ -186,6 +186,16 @@ struct libra_ctx {
         unsigned duration_frames;
     } osd_queue[LIBRA_OSD_MAX];
     unsigned osd_count;
+
+    /* Vulkan context negotiation interface — opaque to keep this header
+     * free of Vulkan types.  Cast by the host to
+     * retro_hw_render_context_negotiation_interface_vulkan* when needed. */
+    const void *vk_negotiation;
+
+    /* retro_hw_render_interface_vulkan* — populated by the host before
+     * libra_hw_render_context_reset(), returned to cores via
+     * RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE. */
+    const void *vk_iface;
 };
 
 #endif /* LIBRA_INTERNAL_H */

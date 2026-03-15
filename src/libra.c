@@ -2144,3 +2144,19 @@ void libra_osd_clear(libra_ctx_t *ctx)
 {
     if (ctx) ctx->osd_count = 0;
 }
+
+/* -------------------------------------------------------------------------
+ * Vulkan interface pointer (set by host, returned to core via
+ * RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE)
+ * ---------------------------------------------------------------------- */
+
+void libra_hw_render_set_vk_interface(libra_ctx_t *ctx, const void *iface)
+{
+    if (ctx)
+        ctx->vk_iface = iface;
+}
+
+const void *libra_get_vk_negotiation(libra_ctx_t *ctx)
+{
+    return ctx ? ctx->vk_negotiation : NULL;
+}

@@ -287,6 +287,15 @@ void libra_hw_render_context_reset(libra_ctx_t *ctx);
 /* Host calls before destroying GL context */
 void libra_hw_render_context_destroy(libra_ctx_t *ctx);
 
+/* Set the retro_hw_render_interface_vulkan* the host has populated.
+ * Must be called before libra_hw_render_context_reset() for Vulkan cores. */
+void libra_hw_render_set_vk_interface(libra_ctx_t *ctx, const void *iface);
+
+/* Return the opaque retro_hw_render_context_negotiation_interface_vulkan*
+ * pointer set by the core via RETRO_ENVIRONMENT_SET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE.
+ * Returns NULL if the core did not set one. */
+const void *libra_get_vk_negotiation(libra_ctx_t *ctx);
+
 /* Forward a keyboard event to the core (for cores using SET_KEYBOARD_CALLBACK).
  * keycode: RETROK_* value from libretro.h
  * character: Unicode codepoint of the key (0 if non-printable)

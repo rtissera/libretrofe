@@ -448,7 +448,7 @@ bool libra_environment_cb(unsigned cmd, void *data)
                 (struct retro_hw_render_callback *)data;
             if (!cb) return false;
 
-            /* Only accept GL/GLES context types */
+            /* Accept GL/GLES and Vulkan context types */
             switch (cb->context_type) {
             case RETRO_HW_CONTEXT_OPENGL:
             case RETRO_HW_CONTEXT_OPENGLES2:
@@ -456,8 +456,13 @@ bool libra_environment_cb(unsigned cmd, void *data)
             case RETRO_HW_CONTEXT_OPENGLES3:
             case RETRO_HW_CONTEXT_OPENGLES_VERSION:
                 break;
+#ifdef HAVE_VULKAN
+            case RETRO_HW_CONTEXT_VULKAN:
+                /* Accepted; host will handle Vulkan context creation. */
+                break;
+#endif
             default:
-                return false; /* Vulkan/D3D not supported */
+                return false; /* D3D and other types not supported */
             }
 
             /* Validate against host-registered device capabilities */
@@ -465,6 +470,12 @@ bool libra_environment_cb(unsigned cmd, void *data)
                 unsigned ct = (unsigned)cb->context_type;
                 if (ct >= 8 || !ctx->hw_caps[ct].supported)
                     return false;
+
+                /* Vulkan has no version negotiation at this level */
+#ifdef HAVE_VULKAN
+                if (ct == RETRO_HW_CONTEXT_VULKAN)
+                    goto hw_render_accept;
+#endif
 
                 /* Determine the minimum version this request requires */
                 unsigned req_maj = cb->version_major;
@@ -483,14 +494,19 @@ bool libra_environment_cb(unsigned cmd, void *data)
                     return false;
             }
 
+#ifdef HAVE_VULKAN
+            hw_render_accept:
+#endif
             ctx->hw_render     = *cb;
             ctx->has_hw_render = true;
 
-            /* Frontend fills in these two function pointers */
+            /* Frontend fills in these two function pointers (GL only;
+             * Vulkan cores use GET_HW_RENDER_INTERFACE instead) */
             cb->get_current_framebuffer = hw_get_current_framebuffer;
             cb->get_proc_address        = hw_get_proc_address_trampoline;
             return true;
         }
+
 
         case RETRO_ENVIRONMENT_SET_GEOMETRY:
             if (ctx->core) {
@@ -1205,19 +1221,38 @@ bool libra_environment_cb(unsigned cmd, void *data)
         /* ---- HW render context negotiation -------------------------------- */
 
         case RETRO_ENVIRONMENT_SET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE:
-            /* Spec says frontend must return true even when the current API
-             * doesn't use context negotiation (so the core knows we're modern).
-             * We only support GL, so just acknowledge and ignore the data. */
+            /* Store negotiation interface pointer; lifetime owned by core.
+             * Opaque here — host casts to the appropriate typed struct. */
+            ctx->vk_negotiation = data;
             return true;
 
         case RETRO_ENVIRONMENT_GET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_SUPPORT: {
             struct retro_hw_render_context_negotiation_interface *iface =
                 (struct retro_hw_render_context_negotiation_interface *)data;
-            if (iface) {
-                iface->interface_type = RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN;
-                iface->interface_version = 0; /* 0 = not supported for this API */
+            if (!iface) return false;
+#ifdef HAVE_VULKAN
+            if (iface->interface_type ==
+                    RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN) {
+                /* Report version 2 — supports create_instance and create_device2 */
+                iface->interface_version = 2;
+                return true;
             }
-            return true;
+#endif
+            return false;
+        }
+
+        case RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE: {
+            const struct retro_hw_render_interface **out =
+                (const struct retro_hw_render_interface **)data;
+            if (!out) return false;
+#ifdef HAVE_VULKAN
+            if (ctx->hw_render.context_type == RETRO_HW_CONTEXT_VULKAN &&
+                ctx->vk_iface) {
+                *out = (const struct retro_hw_render_interface *)ctx->vk_iface;
+                return true;
+            }
+#endif
+            return false;
         }
 
         /* ---- Optional directories ---------------------------------------- */
