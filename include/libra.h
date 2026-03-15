@@ -163,12 +163,17 @@ bool libra_load_sram(libra_ctx_t *ctx, const char *path);
  * Returns true if a write was performed. */
 bool libra_save_sram_if_dirty(libra_ctx_t *ctx, const char *path);
 
-/* Rewind (in-memory compressed ring buffer) */
-bool     libra_rewind_init(libra_ctx_t *ctx, unsigned capacity);
+/* Rewind (circular byte buffer, XOR-delta compressed snapshots)
+ * max_slots — max snapshots kept (older ones evicted first)
+ * max_bytes — total byte budget for compressed data (e.g. 64 MB) */
+bool     libra_rewind_init(libra_ctx_t *ctx, unsigned max_slots, size_t max_bytes);
 void     libra_rewind_deinit(libra_ctx_t *ctx);
 void     libra_rewind_save(libra_ctx_t *ctx);
 bool     libra_rewind_restore(libra_ctx_t *ctx);
 unsigned libra_rewind_available(libra_ctx_t *ctx);
+/* Flush the ring without freeing memory — call after any discontinuous state
+ * change (disk savestate load, core reset) to prevent delta corruption. */
+void     libra_rewind_flush(libra_ctx_t *ctx);
 
 /* Run-ahead: execute N frames ahead, display only the final frame.
  * Reduces perceived input latency by N frames.
@@ -222,6 +227,15 @@ bool libra_supports_no_game(libra_ctx_t *ctx);
  * paths[]:   one path per required ROM slot, in the order the core declared them */
 bool libra_load_game_special(libra_ctx_t *ctx, unsigned game_type,
                               const char **paths, unsigned num_paths);
+
+/* Subsystem introspection — cores register multi-ROM types before retro_load_game().
+ * Call after libra_load_core() and retro_init(), before libra_load_game(). */
+unsigned    libra_subsystem_count(libra_ctx_t *ctx);
+const char *libra_subsystem_desc(libra_ctx_t *ctx, unsigned idx);
+const char *libra_subsystem_ident(libra_ctx_t *ctx, unsigned idx);
+unsigned    libra_subsystem_game_type(libra_ctx_t *ctx, unsigned idx);
+unsigned    libra_subsystem_num_roms(libra_ctx_t *ctx, unsigned idx);
+const char *libra_subsystem_rom_desc(libra_ctx_t *ctx, unsigned idx, unsigned romIdx);
 
 /* Returns true if the core called RETRO_ENVIRONMENT_SHUTDOWN */
 bool libra_is_shutdown_requested(libra_ctx_t *ctx);

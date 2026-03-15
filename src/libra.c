@@ -782,7 +782,7 @@ bool libra_unserialize(libra_ctx_t *ctx, const void *data, size_t size)
 
 #include "rewind.h"
 
-bool libra_rewind_init(libra_ctx_t *ctx, unsigned capacity)
+bool libra_rewind_init(libra_ctx_t *ctx, unsigned max_slots, size_t max_bytes)
 {
     if (!ctx || !ctx->core || !ctx->game_loaded)
         return false;
@@ -790,7 +790,7 @@ bool libra_rewind_init(libra_ctx_t *ctx, unsigned capacity)
     size_t sz = ctx->core->retro_serialize_size();
     if (sz == 0)
         return false;
-    ctx->rewind = libra_rewind_create(capacity, sz);
+    ctx->rewind = libra_rewind_create(max_slots, max_bytes, sz);
     return ctx->rewind != NULL;
 }
 
@@ -832,6 +832,12 @@ unsigned libra_rewind_available(libra_ctx_t *ctx)
     if (!ctx)
         return 0;
     return libra_rewind_count(ctx->rewind);
+}
+
+void libra_rewind_flush(libra_ctx_t *ctx)
+{
+    if (ctx && ctx->rewind)
+        libra_rewind_reset(ctx->rewind);
 }
 
 /* -------------------------------------------------------------------------
@@ -1163,6 +1169,46 @@ bool libra_load_game_special(libra_ctx_t *ctx, unsigned game_type,
 
     ctx->game_loaded = true;
     return true;
+}
+
+/* -------------------------------------------------------------------------
+ * Subsystem introspection
+ * ---------------------------------------------------------------------- */
+
+unsigned libra_subsystem_count(libra_ctx_t *ctx)
+{
+    return ctx ? ctx->subsystem_count : 0;
+}
+
+const char *libra_subsystem_desc(libra_ctx_t *ctx, unsigned idx)
+{
+    if (!ctx || idx >= ctx->subsystem_count) return NULL;
+    return ctx->subsystem_info[idx].desc;
+}
+
+const char *libra_subsystem_ident(libra_ctx_t *ctx, unsigned idx)
+{
+    if (!ctx || idx >= ctx->subsystem_count) return NULL;
+    return ctx->subsystem_info[idx].ident;
+}
+
+unsigned libra_subsystem_game_type(libra_ctx_t *ctx, unsigned idx)
+{
+    if (!ctx || idx >= ctx->subsystem_count) return 0;
+    return ctx->subsystem_info[idx].id;
+}
+
+unsigned libra_subsystem_num_roms(libra_ctx_t *ctx, unsigned idx)
+{
+    if (!ctx || idx >= ctx->subsystem_count) return 0;
+    return ctx->subsystem_info[idx].num_roms;
+}
+
+const char *libra_subsystem_rom_desc(libra_ctx_t *ctx, unsigned idx, unsigned romIdx)
+{
+    if (!ctx || idx >= ctx->subsystem_count) return NULL;
+    if (romIdx >= ctx->subsystem_info[idx].num_roms) return NULL;
+    return ctx->subsystem_info[idx].roms[romIdx].desc;
 }
 
 /* -------------------------------------------------------------------------
