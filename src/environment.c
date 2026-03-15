@@ -867,7 +867,12 @@ bool libra_environment_cb(unsigned cmd, void *data)
         }
 
         case RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY:
-            if (data) ctx->min_audio_latency_ms = *(const unsigned *)data;
+            if (data) {
+                ctx->min_audio_latency_ms = *(const unsigned *)data;
+                /* Re-apply current target so the new floor takes effect immediately */
+                if (ctx->audio && ctx->audio->target_queue_frames > 0)
+                    libra_set_audio_target_queue(ctx, ctx->audio->target_queue_frames);
+            }
             return true;
 
         case RETRO_ENVIRONMENT_SET_AUDIO_BUFFER_STATUS_CALLBACK: {

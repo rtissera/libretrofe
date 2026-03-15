@@ -567,37 +567,8 @@ static bool recv_play_or_spectate(struct libra_netplay *np, int fd,
 static int np_relay_connect(struct libra_netplay *np,
                              const char *ip, uint16_t port)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) { np_msg(np, "Failed to create socket"); return -1; }
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons(port);
-    if (inet_pton(AF_INET, ip, &addr.sin_addr) != 1) {
-        np_msg(np, "Invalid relay IP"); close(fd); return -1;
-    }
-
-    set_nonblocking(fd);
-    int ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
-    if (ret < 0 && errno != EINPROGRESS) {
-        np_msg(np, "Relay connection refused"); close(fd); return -1;
-    }
-    if (ret < 0) {
-        struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-        if (poll(&pfd, 1, 5000) <= 0) {
-            np_msg(np, "Relay connection timed out"); close(fd); return -1;
-        }
-        int err = 0;
-        socklen_t errlen = sizeof(err);
-        getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
-        if (err != 0) { np_msg(np, "Relay connection failed"); close(fd); return -1; }
-    }
-
-    set_nodelay(fd);
-    /* Make blocking for handshake */
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    int fd = netsock_tcp_connect(ip, port);
+    if (fd < 0) np_msg(np, "Relay connection failed");
     return fd;
 }
 
@@ -897,31 +868,10 @@ bool libra_np_host(struct libra_netplay *np, uint16_t port,
     np->next_client_id = 1;
     np->port = port ? port : NP_DEFAULT_PORT;
 
-    /* Create listening socket */
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    /* Create listening socket (dual-stack IPv4+IPv6) */
+    int fd = netsock_tcp_listen(np->port);
     if (fd < 0) {
-        np_msg(np, "Failed to create socket");
-        return false;
-    }
-
-    int opt = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family      = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port        = htons(np->port);
-
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         np_msgf(np, "Failed to bind port %u", np->port);
-        close(fd);
-        return false;
-    }
-
-    if (listen(fd, NP_MAX_PEERS) < 0) {
-        np_msg(np, "Failed to listen");
-        close(fd);
         return false;
     }
 
@@ -947,51 +897,11 @@ bool libra_np_join(struct libra_netplay *np, const char *host_ip,
 
     np_msgf(np, "Connecting to %s:%u...", host_ip, np->port);
 
-    /* Create and connect socket (blocking with timeout) */
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = netsock_tcp_connect(host_ip, np->port);
     if (fd < 0) {
-        np_msg(np, "Failed to create socket");
+        np_msg(np, "Connection failed");
         return false;
     }
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons(np->port);
-    if (inet_pton(AF_INET, host_ip, &addr.sin_addr) != 1) {
-        np_msg(np, "Invalid IP address");
-        close(fd);
-        return false;
-    }
-
-    /* Non-blocking connect with timeout */
-    set_nonblocking(fd);
-    int ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
-    if (ret < 0 && errno != EINPROGRESS) {
-        np_msg(np, "Connection refused");
-        close(fd);
-        return false;
-    }
-
-    if (ret < 0) {
-        /* Wait for connect to complete */
-        struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-        if (poll(&pfd, 1, 5000) <= 0) {
-            np_msg(np, "Connection timed out");
-            close(fd);
-            return false;
-        }
-        int err = 0;
-        socklen_t errlen = sizeof(err);
-        getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
-        if (err != 0) {
-            np_msg(np, "Connection failed");
-            close(fd);
-            return false;
-        }
-    }
-
-    set_nodelay(fd);
 
     /* Create peer struct for host connection */
     struct np_peer *peer = calloc(1, sizeof(*peer));
@@ -1016,10 +926,6 @@ bool libra_np_join(struct libra_netplay *np, const char *host_ip,
      * 9. Send PLAY
      * 10. Receive MODE
      */
-
-    /* Make socket blocking for handshake */
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
 
     /* 1. Send header */
     if (!send_header(np, fd, NP_PROTO_LO)) {
@@ -1096,7 +1002,7 @@ bool libra_np_poll(struct libra_netplay *np)
 
     /* Host: accept new connection (at most one per poll to avoid stalls) */
     if (np->is_host && np->listen_fd >= 0 && np->peer_count < NP_MAX_PEERS) {
-        struct sockaddr_in addr;
+        struct sockaddr_storage addr;
         socklen_t alen = sizeof(addr);
         int fd = accept(np->listen_fd, (struct sockaddr *)&addr, &alen);
         if (fd >= 0) {

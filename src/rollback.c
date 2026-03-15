@@ -23,7 +23,15 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <poll.h>
+#include <pthread.h>
 #include "miniz.h"
+
+/* -------------------------------------------------------------------------
+ * Capability flags (advertised in handshake header word 2)
+ * These are libra-private extensions; RetroArch always sends 0 so RA peers
+ * will have peer_caps=0 and all extension paths stay disabled.
+ * ---------------------------------------------------------------------- */
+#define RB_CAP_DELTA_SAVESTATES 0x00000001u  /* supports CMD_LOAD_SAVESTATE_DELTA */
 
 /* -------------------------------------------------------------------------
  * Ring buffer
@@ -79,6 +87,17 @@ struct libra_rollback {
     /* Savestate compression buffer */
     void    *compress_buf;
     size_t   compress_buf_size;
+
+    /* XOR-delta reference for savestate exchange.
+     * Set to a copy of every full state sent/received so that subsequent
+     * desyncs can send only the diff (much more compressible). */
+    void   *delta_ref;
+    size_t  delta_ref_size;
+
+    /* Capability flags negotiated during handshake.
+     * peer_caps: what the peer advertised; delta_enabled: both sides support deltas. */
+    uint32_t peer_caps;
+    bool     delta_enabled;
 
     /* Protocol version (negotiated) */
     uint32_t protocol;
@@ -153,36 +172,8 @@ static unsigned device_word_count(unsigned device)
 static int rb_relay_connect(struct libra_rollback *rb,
                              const char *ip, uint16_t port)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) { rb_msg(rb, "Failed to create socket"); return -1; }
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons(port);
-    if (inet_pton(AF_INET, ip, &addr.sin_addr) != 1) {
-        rb_msg(rb, "Invalid relay IP"); close(fd); return -1;
-    }
-
-    netsock_set_nonblocking(fd);
-    int ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
-    if (ret < 0 && errno != EINPROGRESS) {
-        rb_msg(rb, "Relay connection refused"); close(fd); return -1;
-    }
-    if (ret < 0) {
-        struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-        if (poll(&pfd, 1, 5000) <= 0) {
-            rb_msg(rb, "Relay connection timed out"); close(fd); return -1;
-        }
-        int err = 0;
-        socklen_t errlen = sizeof(err);
-        getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
-        if (err != 0) { rb_msg(rb, "Relay connection failed"); close(fd); return -1; }
-    }
-
-    netsock_set_nodelay(fd);
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    int fd = netsock_tcp_connect(ip, port);
+    if (fd < 0) rb_msg(rb, "Relay connection failed");
     return fd;
 }
 
@@ -250,7 +241,7 @@ static bool rb_send_header(struct libra_rollback *rb, int fd, uint32_t proto)
     uint32_t hdr[6];
     hdr[0] = htonl(NP_MAGIC);
     hdr[1] = htonl(netsock_platform_magic());
-    hdr[2] = htonl(0); /* compression: none */
+    hdr[2] = htonl(RB_CAP_DELTA_SAVESTATES); /* libra capability flags */
 
     if (rb->is_host)
         hdr[3] = htonl(0);
@@ -272,6 +263,9 @@ static bool rb_recv_header(struct libra_rollback *rb, int fd, uint32_t *out_prot
         rb_msg(rb, "Not a compatible netplay peer");
         return false;
     }
+
+    /* Store peer capability flags (RetroArch always sends 0 here) */
+    rb->peer_caps = ntohl(hdr[2]);
 
     uint32_t lo_proto = ntohl(hdr[4]);
     uint32_t hi_proto = ntohl(hdr[3]);
@@ -727,6 +721,18 @@ static const void *netplay1_unwrap(const void *buf, size_t buf_len, size_t *stat
  * Compressed savestate send/receive
  * ---------------------------------------------------------------------- */
 
+/* Update delta reference — copy state into delta_ref, (re)allocating as needed. */
+static void rb_update_delta_ref(struct libra_rollback *rb, const void *state, size_t sz)
+{
+    if (rb->delta_ref_size != sz) {
+        free(rb->delta_ref);
+        rb->delta_ref = malloc(sz);
+        rb->delta_ref_size = rb->delta_ref ? sz : 0;
+    }
+    if (rb->delta_ref)
+        memcpy(rb->delta_ref, state, sz);
+}
+
 static bool rb_send_savestate(struct libra_rollback *rb, uint32_t frame)
 {
     libra_ctx_t *ctx = rb->ctx;
@@ -742,7 +748,31 @@ static bool rb_send_savestate(struct libra_rollback *rb, uint32_t frame)
         return false;
     }
 
-    /* CRC of the state */
+    /* Decide whether to send a full state or an XOR delta.
+     * Only use delta when both peers negotiated the capability; otherwise
+     * always send full states (ensures interop with RetroArch peers). */
+    bool use_delta = rb->delta_enabled &&
+                     rb->delta_ref != NULL &&
+                     rb->delta_ref_size == sz;
+
+    /* If delta: compute XOR in-place into a temp buffer */
+    void *payload_data = state;  /* points to data to compress */
+    void *delta_buf    = NULL;
+    if (use_delta) {
+        delta_buf = malloc(sz);
+        if (!delta_buf) {
+            use_delta = false;
+        } else {
+            const uint8_t *ref = (const uint8_t *)rb->delta_ref;
+            const uint8_t *src = (const uint8_t *)state;
+            uint8_t *dst       = (uint8_t *)delta_buf;
+            for (size_t i = 0; i < sz; i++)
+                dst[i] = src[i] ^ ref[i];
+            payload_data = delta_buf;
+        }
+    }
+
+    /* CRC of the FULL (non-delta) state for integrity verification */
     uint32_t crc = (uint32_t)crc32(0L, (const Bytef *)state, (uInt)sz);
 
     /* Compress */
@@ -751,34 +781,91 @@ static bool rb_send_savestate(struct libra_rollback *rb, uint32_t frame)
         free(rb->compress_buf);
         rb->compress_buf_size = comp_sz + 256;
         rb->compress_buf = malloc(rb->compress_buf_size);
-        if (!rb->compress_buf) { rb->compress_buf_size = 0; free(state); return false; }
+        if (!rb->compress_buf) {
+            rb->compress_buf_size = 0;
+            free(state); free(delta_buf);
+            return false;
+        }
     }
 
     uLongf actual_comp = comp_sz;
     if (compress2((Bytef *)rb->compress_buf, &actual_comp,
-                  (const Bytef *)state, (uLong)sz, Z_BEST_SPEED) != Z_OK) {
-        free(state);
+                  (const Bytef *)payload_data, (uLong)sz, Z_BEST_SPEED) != Z_OK) {
+        free(state); free(delta_buf);
         return false;
     }
+    free(delta_buf);
+
+    /* Update delta reference BEFORE freeing state */
+    rb_update_delta_ref(rb, state, sz);
     free(state);
 
-    /* Build LOAD_SAVESTATE payload:
-     * frame(4) + orig_size(4) + crc(4) + compressed_data */
+    /* Build payload: frame(4) + orig_size(4) + crc(4) + compressed_data */
     uint32_t payload_size = 12 + (uint32_t)actual_comp;
     uint8_t *payload = (uint8_t *)malloc(payload_size);
     if (!payload) return false;
 
     uint32_t val;
-    val = htonl(frame);
-    memcpy(payload, &val, 4);
-    val = htonl((uint32_t)sz);
-    memcpy(payload + 4, &val, 4);
-    val = htonl(crc);
-    memcpy(payload + 8, &val, 4);
+    val = htonl(frame);           memcpy(payload,     &val, 4);
+    val = htonl((uint32_t)sz);   memcpy(payload + 4, &val, 4);
+    val = htonl(crc);            memcpy(payload + 8, &val, 4);
     memcpy(payload + 12, rb->compress_buf, actual_comp);
 
-    bool ok = netsock_write_cmd(rb->peer_fd, CMD_LOAD_SAVESTATE,
-                                payload, payload_size);
+    uint32_t cmd = use_delta ? CMD_LOAD_SAVESTATE_DELTA : CMD_LOAD_SAVESTATE;
+    bool ok = netsock_write_cmd(rb->peer_fd, cmd, payload, payload_size);
+    free(payload);
+    return ok;
+}
+
+/* -------------------------------------------------------------------------
+ * Background compression — pipelined with handshake I/O
+ * ---------------------------------------------------------------------- */
+
+struct rb_compress_job {
+    const void *input;       /* raw state (caller owns, must outlive thread) */
+    size_t      input_size;
+    void       *output;      /* malloc'd by worker, caller must free */
+    size_t      output_size;
+    uint32_t    crc;         /* CRC32 of input, computed by worker */
+    int         result;      /* Z_OK on success */
+};
+
+static void *rb_compress_worker(void *arg)
+{
+    struct rb_compress_job *job = (struct rb_compress_job *)arg;
+    job->crc = (uint32_t)crc32(0L, (const Bytef *)job->input, (uInt)job->input_size);
+    uLongf bound = compressBound((uLong)job->input_size);
+    job->output = malloc((size_t)bound);
+    if (!job->output) { job->result = Z_MEM_ERROR; return NULL; }
+    uLongf actual = bound;
+    job->result = compress2((Bytef *)job->output, &actual,
+                            (const Bytef *)job->input, (uLong)job->input_size,
+                            Z_BEST_SPEED);
+    job->output_size = (size_t)actual;
+    return NULL;
+}
+
+/* Send a pre-compressed full savestate (no delta — used for initial sync only).
+ * Updates delta_ref so subsequent desync states can use XOR delta. */
+static bool rb_send_precompressed(struct libra_rollback *rb, uint32_t frame,
+                                   const void *raw_state, size_t raw_size,
+                                   const void *comp_data, size_t comp_size,
+                                   uint32_t crc)
+{
+    uint32_t payload_size = 12 + (uint32_t)comp_size;
+    uint8_t *payload = (uint8_t *)malloc(payload_size);
+    if (!payload) return false;
+
+    uint32_t val;
+    val = htonl(frame);              memcpy(payload,      &val, 4);
+    val = htonl((uint32_t)raw_size); memcpy(payload + 4,  &val, 4);
+    val = htonl(crc);                memcpy(payload + 8,  &val, 4);
+    memcpy(payload + 12, comp_data, comp_size);
+
+    /* Establish delta reference so desync recovery can use XOR deltas */
+    rb_update_delta_ref(rb, raw_state, raw_size);
+
+    bool ok = netsock_write_cmd(rb->peer_fd, CMD_LOAD_SAVESTATE, payload, payload_size);
     free(payload);
     return ok;
 }
@@ -900,16 +987,19 @@ static bool rb_dispatch_cmd(struct libra_rollback *rb, size_t *pos)
             break;
         }
 
-        case CMD_LOAD_SAVESTATE: {
-            /* payload: frame(4) + orig_size(4) + crc(4) + compressed_data */
+        case CMD_LOAD_SAVESTATE:
+        case CMD_LOAD_SAVESTATE_DELTA: {
+            /* Full state payload:  frame(4) + orig_size(4) + crc(4) + compressed_data
+             * Delta state payload: same layout but compressed XOR-diff vs delta_ref */
             if (sz < 12) { *pos += sz; break; }
             uint32_t frame_n, orig_n, crc_n;
             memcpy(&frame_n, rb->recv_buf + *pos, 4);
             memcpy(&orig_n,  rb->recv_buf + *pos + 4, 4);
             memcpy(&crc_n,   rb->recv_buf + *pos + 8, 4);
-            uint32_t frame = ntohl(frame_n);
+            uint32_t frame     = ntohl(frame_n);
             uint32_t orig_size = ntohl(orig_n);
             (void)crc_n;
+            bool is_delta = (cmd == CMD_LOAD_SAVESTATE_DELTA);
 
             uint32_t comp_size = sz - 12;
             const uint8_t *comp_data = rb->recv_buf + *pos + 12;
@@ -920,6 +1010,17 @@ static bool rb_dispatch_cmd(struct libra_rollback *rb, size_t *pos)
                 uLongf dest_len = orig_size;
                 if (uncompress((Bytef *)state, &dest_len,
                                comp_data, comp_size) == Z_OK) {
+                    /* If delta: XOR with our reference to reconstruct full state */
+                    if (is_delta && rb->delta_ref && rb->delta_ref_size == dest_len) {
+                        uint8_t *s = (uint8_t *)state;
+                        const uint8_t *ref = (const uint8_t *)rb->delta_ref;
+                        for (uLongf i = 0; i < dest_len; i++)
+                            s[i] ^= ref[i];
+                    }
+
+                    /* Update delta reference with the now-full state */
+                    rb_update_delta_ref(rb, state, (size_t)dest_len);
+
                     /* Check for NETPLAY1 container */
                     size_t inner_size;
                     const void *inner = netplay1_unwrap(state, dest_len, &inner_size);
@@ -941,7 +1042,8 @@ static bool rb_dispatch_cmd(struct libra_rollback *rb, size_t *pos)
                         rb->buffer[i].crc = 0;
                     }
 
-                    rb_msgf(rb, "Loaded savestate at frame %u", frame);
+                    rb_msgf(rb, "Loaded %s at frame %u",
+                            is_delta ? "delta savestate" : "savestate", frame);
                 }
                 free(state);
             }
@@ -1029,6 +1131,7 @@ void libra_rollback_free(struct libra_rollback *rb)
         free(rb->buffer[i].state);
 
     free(rb->compress_buf);
+    free(rb->delta_ref);
     free(rb);
 }
 
@@ -1048,31 +1151,10 @@ bool libra_rb_host(struct libra_rollback *rb, uint16_t port,
     rb->remote_port = 1;
     rb->state_alloc_size = libra_serialize_size(rb->ctx);
 
-    /* Create listening socket */
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    /* Create listening socket (dual-stack IPv4+IPv6) */
+    int fd = netsock_tcp_listen(rb->port);
     if (fd < 0) {
-        rb_msg(rb, "Failed to create socket");
-        return false;
-    }
-
-    int opt = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family      = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port        = htons(rb->port);
-
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         rb_msgf(rb, "Failed to bind port %u", rb->port);
-        close(fd);
-        return false;
-    }
-
-    if (listen(fd, 1) < 0) {
-        rb_msg(rb, "Failed to listen");
-        close(fd);
         return false;
     }
 
@@ -1086,30 +1168,53 @@ bool libra_rb_host(struct libra_rollback *rb, uint16_t port,
 /* Host: accept a single peer (called from rb_run) */
 static bool rb_accept_peer(struct libra_rollback *rb)
 {
+    struct sockaddr_storage addr;
+    socklen_t alen = sizeof(addr);
+    char peer_nick[NP_NICK_LEN];
+    uint32_t proto;
+    int fd;
+    void *raw = NULL;
+    struct rb_compress_job job;
+    pthread_t comp_thread;
+    bool thread_started = false;
+
     if (rb->peer_fd >= 0 || rb->listen_fd < 0)
         return false;
 
-    struct sockaddr_in addr;
-    socklen_t alen = sizeof(addr);
-    int fd = accept(rb->listen_fd, (struct sockaddr *)&addr, &alen);
+    fd = accept(rb->listen_fd, (struct sockaddr *)&addr, &alen);
     if (fd < 0) return false;
 
     netsock_set_nodelay(fd);
 
-    /* Handshake (blocking) */
-    uint32_t proto;
-    if (!rb_recv_header(rb, fd, &proto))   { close(fd); return false; }
-    if (!rb_send_header(rb, fd, proto))    { close(fd); return false; }
+    /* Serialize current state immediately so compression can run concurrently
+     * with the blocking handshake exchange below. */
+    memset(&job, 0, sizeof(job));
+    {
+        size_t sz = libra_serialize_size(rb->ctx);
+        raw = sz ? malloc(sz) : NULL;
+        if (raw) {
+            libra_environment_set_ctx(rb->ctx);
+            if (libra_serialize(rb->ctx, raw, sz)) {
+                job.input      = raw;
+                job.input_size = sz;
+                if (pthread_create(&comp_thread, NULL, rb_compress_worker, &job) == 0)
+                    thread_started = true;
+            }
+        }
+    }
 
-    char peer_nick[NP_NICK_LEN] = {0};
-    if (!rb_recv_nick(rb, fd, peer_nick))  { close(fd); return false; }
-    if (!rb_send_nick(rb, fd))             { close(fd); return false; }
-    if (!rb_send_info(rb, fd))             { close(fd); return false; }
-    if (!rb_recv_info(rb, fd))             { close(fd); return false; }
-
-    if (!rb_send_sync(rb, fd, 1, peer_nick)) { close(fd); return false; }
-    if (!rb_recv_play(rb, fd))             { close(fd); return false; }
-    if (!rb_send_mode_accepted(rb, fd, 1, peer_nick)) { close(fd); return false; }
+    /* Handshake (blocking) — runs concurrently with compression thread */
+    memset(peer_nick, 0, sizeof(peer_nick));
+    if (!rb_recv_header(rb, fd, &proto))              goto fail;
+    if (!rb_send_header(rb, fd, proto))               goto fail;
+    rb->delta_enabled = (rb->peer_caps & RB_CAP_DELTA_SAVESTATES) != 0;
+    if (!rb_recv_nick(rb, fd, peer_nick))             goto fail;
+    if (!rb_send_nick(rb, fd))                        goto fail;
+    if (!rb_send_info(rb, fd))                        goto fail;
+    if (!rb_recv_info(rb, fd))                        goto fail;
+    if (!rb_send_sync(rb, fd, 1, peer_nick))          goto fail;
+    if (!rb_recv_play(rb, fd))                        goto fail;
+    if (!rb_send_mode_accepted(rb, fd, 1, peer_nick)) goto fail;
 
     rb->peer_fd = fd;
     rb->connected = true;
@@ -1119,15 +1224,32 @@ static bool rb_accept_peer(struct libra_rollback *rb)
     close(rb->listen_fd);
     rb->listen_fd = -1;
 
-    /* Send initial savestate synchronously so the client has correct state
-     * before libra_rb_run() is ever called. */
-    rb_send_savestate(rb, rb->self_frame);
+    /* Join compression thread, then send initial savestate */
+    if (thread_started) pthread_join(comp_thread, NULL);
+
+    if (thread_started && job.result == Z_OK) {
+        rb_send_precompressed(rb, rb->self_frame,
+                              job.input, job.input_size,
+                              job.output, job.output_size, job.crc);
+    } else {
+        /* Fallback: serialize+compress inline (compression failed or skipped) */
+        rb_send_savestate(rb, rb->self_frame);
+    }
+    free(job.output);
+    free(raw);
 
     /* Switch to non-blocking for data phase */
     netsock_set_nonblocking(fd);
 
     rb_msgf(rb, "Player 2 connected: %s", peer_nick);
     return true;
+
+fail:
+    if (thread_started) pthread_join(comp_thread, NULL);
+    free(job.output);
+    free(raw);
+    close(fd);
+    return false;
 }
 
 bool libra_rb_join(struct libra_rollback *rb, const char *host_ip,
@@ -1145,59 +1267,18 @@ bool libra_rb_join(struct libra_rollback *rb, const char *host_ip,
 
     rb_msgf(rb, "Connecting to %s:%u...", host_ip, rb->port);
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = netsock_tcp_connect(host_ip, rb->port);
     if (fd < 0) {
-        rb_msg(rb, "Failed to create socket");
+        rb_msg(rb, "Connection failed");
         return false;
     }
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons(rb->port);
-    if (inet_pton(AF_INET, host_ip, &addr.sin_addr) != 1) {
-        rb_msg(rb, "Invalid IP address");
-        close(fd);
-        return false;
-    }
-
-    /* Non-blocking connect with timeout */
-    netsock_set_nonblocking(fd);
-    int ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
-    if (ret < 0 && errno != EINPROGRESS) {
-        rb_msg(rb, "Connection refused");
-        close(fd);
-        return false;
-    }
-
-    if (ret < 0) {
-        struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-        if (poll(&pfd, 1, 5000) <= 0) {
-            rb_msg(rb, "Connection timed out");
-            close(fd);
-            return false;
-        }
-        int err = 0;
-        socklen_t errlen = sizeof(err);
-        getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
-        if (err != 0) {
-            rb_msg(rb, "Connection failed");
-            close(fd);
-            return false;
-        }
-    }
-
-    netsock_set_nodelay(fd);
-
-    /* Make blocking for handshake */
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
 
     /* Client handshake */
     if (!rb_send_header(rb, fd, NP_PROTO_LO)) { close(fd); return false; }
 
     uint32_t proto;
     if (!rb_recv_header(rb, fd, &proto)) { close(fd); return false; }
+    rb->delta_enabled = (rb->peer_caps & RB_CAP_DELTA_SAVESTATES) != 0;
 
     if (!rb_send_nick(rb, fd)) { close(fd); return false; }
 
@@ -1245,6 +1326,8 @@ bool libra_rb_join(struct libra_rollback *rb, const char *host_ip,
                     uLongf dest_len = orig_size;
                     if (uncompress((Bytef *)state, &dest_len,
                                    (const Bytef *)comp_data, comp_size) == Z_OK) {
+                        /* Seed delta reference so subsequent deltas apply correctly */
+                        rb_update_delta_ref(rb, state, (size_t)dest_len);
                         /* Check for NETPLAY1 container */
                         size_t inner_size;
                         const void *inner = netplay1_unwrap(state, dest_len, &inner_size);
@@ -1562,6 +1645,14 @@ bool libra_rb_host_relay(struct libra_rollback *rb,
                           uint8_t mitm_id_out[MITM_ID_SIZE],
                           libra_net_message_cb_t msg_cb)
 {
+    uint32_t proto;
+    char peer_nick[NP_NICK_LEN];
+    int fd;
+    void *raw = NULL;
+    struct rb_compress_job job;
+    pthread_t comp_thread;
+    bool thread_started = false;
+
     if (!rb || !rb->ctx->core || !rb->ctx->game_loaded || !relay_ip) return false;
     libra_rb_disconnect(rb);
 
@@ -1577,36 +1668,69 @@ bool libra_rb_host_relay(struct libra_rollback *rb,
     uint16_t port = relay_port ? relay_port : NP_DEFAULT_PORT;
     rb_msgf(rb, "Connecting to relay %s:%u...", relay_ip, port);
 
-    int fd = rb_relay_create_session(rb, relay_ip, port, mitm_id_out);
+    fd = rb_relay_create_session(rb, relay_ip, port, mitm_id_out);
     if (fd < 0) return false;
 
     rb_msg(rb, "Relay session created, waiting for peer...");
 
-    /* Now the relay fd will forward the client handshake to us.
-     * Perform server-side handshake on this fd (blocking). */
-    uint32_t proto;
-    char peer_nick[NP_NICK_LEN] = {0};
-    if (!rb_recv_header(rb, fd, &proto))     { close(fd); return false; }
-    if (!rb_send_header(rb, fd, proto))      { close(fd); return false; }
-    if (!rb_recv_nick(rb, fd, peer_nick))    { close(fd); return false; }
-    if (!rb_send_nick(rb, fd))               { close(fd); return false; }
-    if (!rb_send_info(rb, fd))               { close(fd); return false; }
-    if (!rb_recv_info(rb, fd))               { close(fd); return false; }
-    if (!rb_send_sync(rb, fd, 1, peer_nick)) { close(fd); return false; }
-    if (!rb_recv_play(rb, fd))               { close(fd); return false; }
-    if (!rb_send_mode_accepted(rb, fd, 1, peer_nick)) { close(fd); return false; }
+    /* Serialize current state immediately so compression runs while we wait
+     * for the peer to connect and complete the handshake exchange. */
+    memset(&job, 0, sizeof(job));
+    {
+        size_t sz = libra_serialize_size(rb->ctx);
+        raw = sz ? malloc(sz) : NULL;
+        if (raw) {
+            libra_environment_set_ctx(rb->ctx);
+            if (libra_serialize(rb->ctx, raw, sz)) {
+                job.input      = raw;
+                job.input_size = sz;
+                if (pthread_create(&comp_thread, NULL, rb_compress_worker, &job) == 0)
+                    thread_started = true;
+            }
+        }
+    }
+
+    /* Server-side handshake (blocking) — runs concurrently with compression */
+    memset(peer_nick, 0, sizeof(peer_nick));
+    if (!rb_recv_header(rb, fd, &proto))              goto fail;
+    if (!rb_send_header(rb, fd, proto))               goto fail;
+    rb->delta_enabled = (rb->peer_caps & RB_CAP_DELTA_SAVESTATES) != 0;
+    if (!rb_recv_nick(rb, fd, peer_nick))             goto fail;
+    if (!rb_send_nick(rb, fd))                        goto fail;
+    if (!rb_send_info(rb, fd))                        goto fail;
+    if (!rb_recv_info(rb, fd))                        goto fail;
+    if (!rb_send_sync(rb, fd, 1, peer_nick))          goto fail;
+    if (!rb_recv_play(rb, fd))                        goto fail;
+    if (!rb_send_mode_accepted(rb, fd, 1, peer_nick)) goto fail;
 
     rb->peer_fd = fd;
     rb->connected = true;
     rb->protocol = proto;
 
-    /* Send initial savestate synchronously */
-    rb_send_savestate(rb, rb->self_frame);
+    /* Join compression thread, then send initial savestate */
+    if (thread_started) pthread_join(comp_thread, NULL);
+
+    if (thread_started && job.result == Z_OK) {
+        rb_send_precompressed(rb, rb->self_frame,
+                              job.input, job.input_size,
+                              job.output, job.output_size, job.crc);
+    } else {
+        rb_send_savestate(rb, rb->self_frame);
+    }
+    free(job.output);
+    free(raw);
 
     netsock_set_nonblocking(fd);
 
     rb_msgf(rb, "Relay: peer connected: %s", peer_nick);
     return true;
+
+fail:
+    if (thread_started) pthread_join(comp_thread, NULL);
+    free(job.output);
+    free(raw);
+    close(fd);
+    return false;
 }
 
 bool libra_rb_join_relay(struct libra_rollback *rb,
@@ -1634,6 +1758,7 @@ bool libra_rb_join_relay(struct libra_rollback *rb,
     if (!rb_send_header(rb, fd, NP_PROTO_LO)) { close(fd); return false; }
     uint32_t proto;
     if (!rb_recv_header(rb, fd, &proto))       { close(fd); return false; }
+    rb->delta_enabled = (rb->peer_caps & RB_CAP_DELTA_SAVESTATES) != 0;
     if (!rb_send_nick(rb, fd))                 { close(fd); return false; }
     char host_nick[NP_NICK_LEN] = {0};
     if (!rb_recv_nick(rb, fd, host_nick))      { close(fd); return false; }
@@ -1668,6 +1793,7 @@ bool libra_rb_join_relay(struct libra_rollback *rb,
                             uLongf dest_len = orig_size;
                             if (uncompress((Bytef *)state, &dest_len,
                                            (const Bytef *)comp_data, comp_size) == Z_OK) {
+                                rb_update_delta_ref(rb, state, (size_t)dest_len);
                                 size_t inner_size;
                                 const void *inner = netplay1_unwrap(state, dest_len, &inner_size);
                                 libra_environment_set_ctx(rb->ctx);

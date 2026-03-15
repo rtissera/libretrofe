@@ -7,6 +7,7 @@
  */
 #include "netsock.h"
 
+#include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -14,6 +15,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <poll.h>
 
 bool netsock_set_nonblocking(int fd)
@@ -94,4 +96,100 @@ uint32_t netsock_impl_magic(void)
     for (size_t i = 0; ver[i]; i++)
         h = (h << 1) | ((h >> 31) & 1);
     return h;
+}
+
+/* -------------------------------------------------------------------------
+ * IPv4 + IPv6 dual-stack helpers
+ * ---------------------------------------------------------------------- */
+
+int netsock_tcp_connect(const char *host, uint16_t port)
+{
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
+
+    struct addrinfo hints = {0};
+    hints.ai_family   = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res)
+        return -1;
+
+    int fd = -1;
+    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) continue;
+
+        /* Non-blocking connect with 5-second timeout */
+        int flags = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+        int ret = connect(fd, ai->ai_addr, ai->ai_addrlen);
+        if (ret == 0) {
+            /* Immediate connect (unusual but valid) */
+        } else if (errno == EINPROGRESS) {
+            struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+            if (poll(&pfd, 1, 5000) <= 0) {
+                close(fd); fd = -1; continue;
+            }
+            int err = 0;
+            socklen_t errlen = sizeof(err);
+            getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen);
+            if (err != 0) { close(fd); fd = -1; continue; }
+        } else {
+            close(fd); fd = -1; continue;
+        }
+
+        /* Connected — make blocking and set TCP_NODELAY */
+        fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+        netsock_set_nodelay(fd);
+        break;
+    }
+
+    freeaddrinfo(res);
+    return fd;
+}
+
+int netsock_tcp_listen(uint16_t port)
+{
+    int opt;
+
+    /* Try dual-stack IPv6 first (accepts both IPv4 and IPv6) */
+    int fd = socket(AF_INET6, SOCK_STREAM, 0);
+    if (fd >= 0) {
+        opt = 1;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        int no = 0;
+        setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &no, sizeof(no));
+
+        struct sockaddr_in6 addr = {0};
+        addr.sin6_family = AF_INET6;
+        addr.sin6_addr   = in6addr_any;
+        addr.sin6_port   = htons(port);
+
+        if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 &&
+            listen(fd, 16) == 0)
+            return fd;
+
+        close(fd);
+    }
+
+    /* Fallback: IPv4-only (for kernels/systems without IPv6) */
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr4 = {0};
+    addr4.sin_family      = AF_INET;
+    addr4.sin_addr.s_addr = INADDR_ANY;
+    addr4.sin_port        = htons(port);
+
+    if (bind(fd, (struct sockaddr *)&addr4, sizeof(addr4)) == 0 &&
+        listen(fd, 16) == 0)
+        return fd;
+
+    close(fd);
+    return -1;
 }

@@ -259,8 +259,16 @@ void libra_set_audio_queue_depth(libra_ctx_t *ctx, unsigned bytes)
 
 void libra_set_audio_target_queue(libra_ctx_t *ctx, unsigned target_frames)
 {
-    if (ctx && ctx->audio)
-        ctx->audio->target_queue_frames = target_frames;
+    if (!ctx || !ctx->audio) return;
+    /* Honour SET_MINIMUM_AUDIO_LATENCY: raise floor to respect core's request */
+    if (ctx->min_audio_latency_ms > 0 && ctx->core) {
+        double fps = ctx->core->av_info.timing.fps;
+        if (fps > 0.0) {
+            unsigned min_f = (unsigned)(ctx->min_audio_latency_ms * fps / 1000.0 + 0.999);
+            if (target_frames < min_f) target_frames = min_f;
+        }
+    }
+    ctx->audio->target_queue_frames = target_frames;
 }
 
 bool libra_load_core(libra_ctx_t *ctx, const char *path)

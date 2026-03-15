@@ -38,8 +38,9 @@
 #define CMD_NOINPUT         0x0004u
 #define CMD_CRC             0x0040u
 #define CMD_REQUEST_SAVESTATE 0x0041u
-#define CMD_LOAD_SAVESTATE  0x0042u
-#define CMD_STALL           0x0045u
+#define CMD_LOAD_SAVESTATE       0x0042u
+#define CMD_LOAD_SAVESTATE_DELTA 0x0043u  /* payload: frame(4)+orig_size(4)+crc(4)+XOR-delta compressed */
+#define CMD_STALL                0x0045u
 
 /* MODE bits */
 #define MODE_BIT_YOU        (1u << 31)
@@ -72,5 +73,20 @@ bool netsock_write_cmd(int fd, uint32_t cmd_id,
 /* Platform / implementation magic */
 uint32_t netsock_platform_magic(void);
 uint32_t netsock_impl_magic(void);
+
+/* -------------------------------------------------------------------------
+ * IPv4 + IPv6 dual-stack helpers
+ * ---------------------------------------------------------------------- */
+
+/* Connect to host:port using getaddrinfo (supports IPv4 and IPv6 literals
+ * and hostnames).  Non-blocking connect with 5-second timeout.
+ * Returns a connected, blocking, TCP_NODELAY file descriptor, or -1. */
+int netsock_tcp_connect(const char *host, uint16_t port);
+
+/* Create a dual-stack (AF_INET6 + IPV6_V6ONLY=0) TCP listening socket bound
+ * to port on all interfaces.  Falls back to AF_INET if IPv6 is unavailable.
+ * Returns a blocking fd ready for accept() (caller should set non-blocking),
+ * or -1 on failure. */
+int netsock_tcp_listen(uint16_t port);
 
 #endif /* LIBRA_NETSOCK_H */
