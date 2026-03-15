@@ -4,6 +4,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -92,6 +93,43 @@ bool libra_slang_compile(const char *source, size_t len,
     int gl_version, bool is_es,
     char *vs_out, size_t vs_size, char *fs_out, size_t fs_size,
     char *fmt_out, size_t fmt_size);
+
+/* SPIR-V output from .slang compilation — for Vulkan shader chain.
+ * vs_out / fs_out are heap-allocated uint32 word arrays.
+ * Free each with libra_spirv_free().  fmt_out receives the #pragma format
+ * string (e.g. "R16G16B16A16_SFLOAT"), empty if absent. */
+bool libra_slang_compile_spirv(const char *source, size_t len,
+    const char *base_dir,
+    uint32_t **vs_out, size_t *vs_words,
+    uint32_t **fs_out, size_t *fs_words,
+    char *fmt_out, size_t fmt_size);
+
+void libra_spirv_free(uint32_t *p);
+
+/* Per-member info returned by UBO reflection. */
+typedef struct {
+    char     name[64];
+    uint32_t offset;  /* byte offset within the UBO */
+    uint32_t size;    /* byte size of this member */
+} libra_ubo_member_t;
+
+/* Per-sampler binding info returned by sampler reflection. */
+typedef struct {
+    char     name[64];
+    uint32_t binding; /* descriptor binding number */
+} libra_sampler_binding_t;
+
+/* Reflect UBO members from SPIR-V (pass the fragment shader words).
+ * ubo_size_out receives total declared struct size in bytes.
+ * On input *member_count is max capacity; on output actual count written. */
+bool libra_spirv_reflect_ubo(const uint32_t *spirv, size_t words,
+    uint32_t *ubo_size_out,
+    libra_ubo_member_t *members, unsigned *member_count);
+
+/* Reflect combined-image-sampler bindings from SPIR-V.
+ * On input *count is max capacity; on output actual count written. */
+bool libra_spirv_reflect_samplers(const uint32_t *spirv, size_t words,
+    libra_sampler_binding_t *samplers, unsigned *count);
 
 #ifdef __cplusplus
 }

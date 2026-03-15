@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -416,5 +417,188 @@ extern "C" bool libra_slang_compile(const char *source, size_t len,
     memcpy(fs_out, fs_glsl.c_str(), fs_glsl.size() + 1);
 
     release_glslang();
+    return true;
+}
+
+/* ── New public API: raw SPIR-V output ──────────────────────────── */
+
+extern "C" bool libra_slang_compile_spirv(
+    const char *source, size_t len, const char *base_dir,
+    uint32_t **vs_out, size_t *vs_words,
+    uint32_t **fs_out, size_t *fs_words,
+    char *fmt_out, size_t fmt_size)
+{
+    if (!vs_out || !vs_words || !fs_out || !fs_words) return false;
+    *vs_out = nullptr; *fs_out = nullptr;
+    *vs_words = 0; *fs_words = 0;
+
+    ensure_glslang_init();
+
+    std::string expanded_src;
+    const char *src_ptr = source;
+    size_t src_len = len;
+    if (base_dir && base_dir[0]) {
+        if (!expand_includes(std::string(source, len), base_dir, expanded_src, 0)) {
+            release_glslang();
+            return false;
+        }
+        src_ptr = expanded_src.c_str();
+        src_len = expanded_src.size();
+    }
+
+    std::string vs_vulkan, fs_vulkan, fmt_str;
+    if (!preprocess_slang(src_ptr, src_len, vs_vulkan, fs_vulkan, fmt_str)) {
+        release_glslang();
+        return false;
+    }
+
+    if (fmt_out && fmt_size > 0) {
+        if (fmt_str.size() + 1 <= fmt_size)
+            memcpy(fmt_out, fmt_str.c_str(), fmt_str.size() + 1);
+        else
+            fmt_out[0] = '\0';
+    }
+
+    std::vector<uint32_t> vs_spirv, fs_spirv;
+    if (!compile_to_spirv(vs_vulkan.c_str(), GLSLANG_STAGE_VERTEX, vs_spirv)) {
+        fprintf(stderr, TAG "vertex SPIR-V compile failed\n");
+        release_glslang();
+        return false;
+    }
+    if (!compile_to_spirv(fs_vulkan.c_str(), GLSLANG_STAGE_FRAGMENT, fs_spirv)) {
+        fprintf(stderr, TAG "fragment SPIR-V compile failed\n");
+        release_glslang();
+        return false;
+    }
+
+    *vs_words = vs_spirv.size();
+    *vs_out   = (uint32_t*)malloc(vs_spirv.size() * sizeof(uint32_t));
+    if (!*vs_out) { release_glslang(); return false; }
+    memcpy(*vs_out, vs_spirv.data(), vs_spirv.size() * sizeof(uint32_t));
+
+    *fs_words = fs_spirv.size();
+    *fs_out   = (uint32_t*)malloc(fs_spirv.size() * sizeof(uint32_t));
+    if (!*fs_out) { free(*vs_out); *vs_out = nullptr; release_glslang(); return false; }
+    memcpy(*fs_out, fs_spirv.data(), fs_spirv.size() * sizeof(uint32_t));
+
+    release_glslang();
+    return true;
+}
+
+extern "C" void libra_spirv_free(uint32_t *p)
+{
+    free(p);
+}
+
+extern "C" bool libra_spirv_reflect_ubo(
+    const uint32_t *spirv, size_t words,
+    uint32_t *ubo_size_out,
+    libra_ubo_member_t *members, unsigned *member_count)
+{
+    if (!spirv || words == 0 || !ubo_size_out || !members || !member_count)
+        return false;
+
+    unsigned cap = *member_count;
+    *member_count = 0;
+    *ubo_size_out = 0;
+
+    spvc_context ctx = NULL;
+    if (spvc_context_create(&ctx) != SPVC_SUCCESS) return false;
+
+    spvc_parsed_ir ir = NULL;
+    if (spvc_context_parse_spirv(ctx, spirv, words, &ir) != SPVC_SUCCESS) {
+        spvc_context_destroy(ctx); return false;
+    }
+
+    spvc_compiler compiler = NULL;
+    if (spvc_context_create_compiler(ctx, SPVC_BACKEND_NONE, ir,
+            SPVC_CAPTURE_MODE_TAKE_OWNERSHIP, &compiler) != SPVC_SUCCESS) {
+        spvc_context_destroy(ctx); return false;
+    }
+
+    spvc_resources resources = NULL;
+    spvc_compiler_create_shader_resources(compiler, &resources);
+
+    const spvc_reflected_resource *ubos = NULL;
+    size_t num_ubos = 0;
+    spvc_resources_get_resource_list_for_type(resources,
+        SPVC_RESOURCE_TYPE_UNIFORM_BUFFER, &ubos, &num_ubos);
+
+    if (num_ubos == 0) { spvc_context_destroy(ctx); return true; }
+
+    /* Use first UBO (binding 0) */
+    spvc_type type = spvc_compiler_get_type_handle(compiler, ubos[0].base_type_id);
+    unsigned num_members = spvc_type_get_num_member_types(type);
+
+    size_t ubo_size = 0;
+    spvc_compiler_get_declared_struct_size(compiler, type, &ubo_size);
+    *ubo_size_out = (uint32_t)ubo_size;
+
+    unsigned written = 0;
+    for (unsigned i = 0; i < num_members && written < cap; i++) {
+        const char *name = spvc_compiler_get_member_name(
+            compiler, ubos[0].base_type_id, i);
+        uint32_t offset = 0;
+        spvc_compiler_type_struct_member_offset(compiler, type, i, &offset);
+        size_t msize = 0;
+        spvc_compiler_get_declared_struct_member_size(compiler, type, i, &msize);
+        if (name && name[0]) {
+            strncpy(members[written].name, name, sizeof(members[written].name) - 1);
+            members[written].name[sizeof(members[written].name) - 1] = '\0';
+            members[written].offset = offset;
+            members[written].size   = (uint32_t)msize;
+            written++;
+        }
+    }
+    *member_count = written;
+    spvc_context_destroy(ctx);
+    return true;
+}
+
+extern "C" bool libra_spirv_reflect_samplers(
+    const uint32_t *spirv, size_t words,
+    libra_sampler_binding_t *samplers, unsigned *count)
+{
+    if (!spirv || words == 0 || !samplers || !count) return false;
+
+    unsigned cap = *count;
+    *count = 0;
+
+    spvc_context ctx = NULL;
+    if (spvc_context_create(&ctx) != SPVC_SUCCESS) return false;
+
+    spvc_parsed_ir ir = NULL;
+    if (spvc_context_parse_spirv(ctx, spirv, words, &ir) != SPVC_SUCCESS) {
+        spvc_context_destroy(ctx); return false;
+    }
+
+    spvc_compiler compiler = NULL;
+    if (spvc_context_create_compiler(ctx, SPVC_BACKEND_NONE, ir,
+            SPVC_CAPTURE_MODE_TAKE_OWNERSHIP, &compiler) != SPVC_SUCCESS) {
+        spvc_context_destroy(ctx); return false;
+    }
+
+    spvc_resources resources = NULL;
+    spvc_compiler_create_shader_resources(compiler, &resources);
+
+    const spvc_reflected_resource *samp = NULL;
+    size_t num_samp = 0;
+    spvc_resources_get_resource_list_for_type(resources,
+        SPVC_RESOURCE_TYPE_SAMPLED_IMAGE, &samp, &num_samp);
+
+    unsigned written = 0;
+    for (size_t i = 0; i < num_samp && written < cap; i++) {
+        uint32_t binding = spvc_compiler_get_decoration(
+            compiler, samp[i].id, SpvDecorationBinding);
+        const char *name = samp[i].name;
+        if (name && name[0]) {
+            strncpy(samplers[written].name, name, sizeof(samplers[written].name) - 1);
+            samplers[written].name[sizeof(samplers[written].name) - 1] = '\0';
+            samplers[written].binding = binding;
+            written++;
+        }
+    }
+    *count = written;
+    spvc_context_destroy(ctx);
     return true;
 }
