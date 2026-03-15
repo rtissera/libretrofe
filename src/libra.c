@@ -4,6 +4,7 @@
 #include "input.h"
 #include "netplay.h"
 #include "rollback.h"
+#include "rewind.h"
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>  /* strcasecmp */
@@ -507,6 +508,7 @@ void libra_reset(libra_ctx_t *ctx)
     s_active = ctx;
     libra_environment_set_ctx(ctx);
     ctx->core->retro_reset();
+    libra_rewind_reset(ctx->rewind);  /* state is discontinuous after reset */
 }
 
 double libra_get_fps(libra_ctx_t *ctx)
@@ -779,8 +781,6 @@ bool libra_unserialize(libra_ctx_t *ctx, const void *data, size_t size)
 /* -------------------------------------------------------------------------
  * Rewind (in-memory compressed ring buffer)
  * ---------------------------------------------------------------------- */
-
-#include "rewind.h"
 
 bool libra_rewind_init(libra_ctx_t *ctx, unsigned max_slots, size_t max_bytes)
 {

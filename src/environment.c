@@ -2,6 +2,7 @@
 #include "environment.h"
 #include "libra_internal.h"
 #include "audio.h"
+#include "rewind.h"
 #include "vfs.h"
 #include <stdio.h>
 #include <stdarg.h>
@@ -506,6 +507,7 @@ bool libra_environment_cb(unsigned cmd, void *data)
                 ctx->core->av_info = *av;
                 if (ctx->audio)
                     libra_audio_set_src_rate(ctx->audio, av->timing.sample_rate);
+                libra_rewind_reset(ctx->rewind);  /* AV info change = discontinuous state */
             }
             return true;
 
