@@ -176,6 +176,8 @@ void libra_destroy(libra_ctx_t *ctx)
             free((void *)ctx->input_descriptors[i].description);
         free(ctx->input_descriptors);
     }
+    free(ctx->ra_buf);
+    ctx->ra_buf = NULL;
     libra_netplay_free(ctx->netplay);
     ctx->netplay = NULL;
     libra_rollback_free(ctx->rollback);
@@ -799,6 +801,10 @@ bool libra_rewind_init(libra_ctx_t *ctx, unsigned max_slots, size_t max_bytes)
     if (sz == 0)
         return false;
     ctx->rewind = libra_rewind_create(max_slots, max_bytes, sz);
+    if (ctx->rewind) {
+        ctx->rewind_max_slots = max_slots;
+        ctx->rewind_max_bytes = max_bytes;
+    }
     return ctx->rewind != NULL;
 }
 
@@ -814,12 +820,25 @@ void libra_rewind_save(libra_ctx_t *ctx)
 {
     if (!ctx || !ctx->core || !ctx->game_loaded || !ctx->rewind)
         return;
+
+    /* RETRO_SERIALIZATION_QUIRK_FRONT_VARIABLE_SIZE: size can grow each frame.
+     * Detect changes and reinit the ring so serialize never overflows. */
+    size_t live_sz = ctx->core->retro_serialize_size();
+    if (live_sz == 0)
+        return;
+    if (live_sz != libra_rewind_state_size(ctx->rewind)) {
+        libra_rewind_destroy(ctx->rewind);
+        ctx->rewind = libra_rewind_create(ctx->rewind_max_slots,
+                                          ctx->rewind_max_bytes, live_sz);
+        if (!ctx->rewind)
+            return;
+    }
+
     /* Serialize directly into the rewind's pre-allocated buffer */
     void *buf = libra_rewind_serialize_buf(ctx->rewind);
-    size_t sz = libra_rewind_state_size(ctx->rewind);
-    if (!buf || sz == 0)
+    if (!buf)
         return;
-    if (ctx->core->retro_serialize(buf, sz))
+    if (ctx->core->retro_serialize(buf, live_sz))
         libra_rewind_push(ctx->rewind);
 }
 
@@ -859,11 +878,16 @@ void libra_run_ahead(libra_ctx_t *ctx, unsigned frames)
         return;
     }
 
-    /* Save state */
+    /* Save state into persistent buffer — realloc only when size grows */
     size_t sz = ctx->core->retro_serialize_size();
-    void *state = malloc(sz);
+    if (sz > ctx->ra_buf_size) {
+        void *nb = realloc(ctx->ra_buf, sz);
+        if (!nb) { libra_run(ctx); return; }
+        ctx->ra_buf      = nb;
+        ctx->ra_buf_size = sz;
+    }
+    void *state = ctx->ra_buf;
     if (!state || !ctx->core->retro_serialize(state, sz)) {
-        free(state);
         libra_run(ctx);
         return;
     }
@@ -902,8 +926,6 @@ void libra_run_ahead(libra_ctx_t *ctx, unsigned frames)
     ctx->config.audio      = saved_audio;
     ctx->config.input_poll = saved_poll;
     ctx->savestate_context = saved_ctx;
-
-    free(state);
 }
 
 /* -------------------------------------------------------------------------

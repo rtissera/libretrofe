@@ -161,6 +161,12 @@ struct libra_ctx {
 
     /* Rewind state (owned by rewind.c) */
     struct libra_rewind *rewind;
+    unsigned             rewind_max_slots;  /* saved from libra_rewind_init for reinit */
+    size_t               rewind_max_bytes;
+
+    /* Run-ahead: persistent serialize buffer — realloc'd only when size grows */
+    void  *ra_buf;
+    size_t ra_buf_size;
 
     /* Rollback state (owned by rollback.c) */
     struct libra_rollback *rollback;
