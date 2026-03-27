@@ -31,8 +31,13 @@ void libra_audio_set_src_rate(libra_audio_t *a, double src_rate)
 
 void libra_audio_push(libra_audio_t *a, int16_t left, int16_t right)
 {
-    if (a->count >= LIBRA_RING_FRAMES)
-        return; /* overflow: drop oldest would be better, but keep it simple */
+    if (a->count >= LIBRA_RING_FRAMES) {
+        /* Buffer full: overwrite the oldest sample so we stay current.
+         * This is better than dropping the newest (old behavior) because
+         * old audio is stale — we want the latest samples to be heard. */
+        a->read_pos = (a->read_pos + 1) % LIBRA_RING_FRAMES;
+        a->count--;
+    }
 
     unsigned pos = a->write_pos * 2;
     a->buf[pos]     = left;
