@@ -117,42 +117,19 @@ static int btn_name_to_id(const char *name)
     return -1;
 }
 
-/* Parse a RetroArch-format remap line:
- *   input_player<N>_btn_<name> = "<id>"
- *   input_player<N>_btn_<name> = <id>
- * Returns 1 if parsed, 0 if not this format. */
-static int parse_retroarch_remap_line(const char *lhs, const char *rhs,
-                                       int *out_port, int *out_src, int *out_dst)
-{
-    int player = 0;
-    char btn_name[32] = {0};
-
-    /* Match input_player<N>_btn_<name> */
-    if (sscanf(lhs, "input_player%d_btn_%31s", &player, btn_name) != 2)
-        return 0;
-    if (player < 1 || player > 16)
-        return 0;
-
-    /* Trim trailing spaces from btn_name */
-    for (int i = (int)strlen(btn_name) - 1; i >= 0 && btn_name[i] == ' '; i--)
-        btn_name[i] = '\0';
-
-    /* Parse value: may be quoted ("8") or bare (8) */
-    int dst_id = -1;
-    if (rhs[0] == '"')
-        dst_id = atoi(rhs + 1);
-    else
-        dst_id = atoi(rhs);
-
-    int src = btn_name_to_id(btn_name);
-    if (src < 0 || dst_id < 0 || dst_id > 15)
-        return 0;
-
-    *out_port = player - 1; /* RA is 1-based, remap table is 0-based */
-    *out_src  = src;
-    *out_dst  = dst_id;
-    return 1;
-}
+/* Load a .rmp remap file.
+ *
+ * Standard format (clean-room implementation of the well-known
+ * key=value convention used by libretro frontends):
+ *
+ *   input_player1_btn_b = "0"
+ *   input_player1_btn_a = "8"
+ *   input_player2_btn_x = "9"
+ *
+ * Each line maps a physical button (left of =) to a logical
+ * libretro RETRO_DEVICE_ID_JOYPAD_* value (right of =).
+ * Player numbering is 1-based. Values may be quoted or bare.
+ * Lines starting with # are comments. */
 
 unsigned libra_load_remaps(libra_ctx_t *ctx, const char *path)
 {
@@ -188,43 +165,28 @@ unsigned libra_load_remaps(libra_ctx_t *ctx, const char *path)
             while (llen > 0 && llhs[llen-1] == ' ') llhs[--llen] = '\0';
         }
 
-        /* Try RetroArch format: input_player<N>_btn_<name> = "<id>" */
-        {
-            int ra_port, ra_src, ra_dst;
-            if (parse_retroarch_remap_line(lhs, rhs, &ra_port, &ra_src, &ra_dst)) {
-                if (ra_port < 16) {
-                    ctx->remap[ra_port][ra_src] = (int8_t)ra_dst;
-                    applied++;
-                }
-                continue;
-            }
-        }
+        /* Parse: input_player<N>_btn_<name> = ["]<id>["] */
+        int player = 0;
+        char btn_name[32] = {0};
+        if (sscanf(lhs, "input_player%d_btn_%31s", &player, btn_name) != 2)
+            continue;
+        if (player < 1 || player > 16)
+            continue;
 
-        /* Try libra format: [port<N> ]joypad_<name> = joypad_<name> */
-        {
-            int port = 0;
-            const char *p = lhs;
-            if (p[0] == 'p' && p[1] == 'o' && p[2] == 'r' && p[3] == 't'
-                && p[4] >= '0' && p[4] <= '9') {
-                port = p[4] - '0';
-                p = p + 6;
-            }
-            while (*p == ' ') p++;
+        /* Trim trailing spaces from btn_name */
+        for (int i = (int)strlen(btn_name) - 1; i >= 0 && btn_name[i] == ' '; i--)
+            btn_name[i] = '\0';
 
-            char src_buf[32] = {0}, dst_buf[32] = {0};
-            if (sscanf(p, "joypad_%31s", src_buf) == 1 &&
-                sscanf(rhs, "joypad_%31s", dst_buf) == 1)
-            {
-                for (int i = (int)strlen(src_buf) - 1; i >= 0 && src_buf[i] == ' '; i--)
-                    src_buf[i] = '\0';
-                int src = btn_name_to_id(src_buf);
-                int dst = btn_name_to_id(dst_buf);
-                if (src >= 0 && dst >= 0 && port < 16) {
-                    ctx->remap[port][src] = (int8_t)dst;
-                    applied++;
-                }
-            }
-        }
+        /* Parse value: may be quoted ("8") or bare (8) */
+        int dst_id = (rhs[0] == '"') ? atoi(rhs + 1) : atoi(rhs);
+
+        int src = btn_name_to_id(btn_name);
+        if (src < 0 || dst_id < 0 || dst_id > 15)
+            continue;
+
+        int port = player - 1; /* 1-based → 0-based */
+        ctx->remap[port][src] = (int8_t)dst_id;
+        applied++;
     }
     fclose(f);
 
