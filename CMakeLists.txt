@@ -25,6 +25,8 @@ add_library(libra
     src/slang_spirv.cpp
     src/video.c
     src/image.c
+    src/ratio.c
+    src/emulnk.c
     deps/miniz.c
     deps/zstd.c
 )

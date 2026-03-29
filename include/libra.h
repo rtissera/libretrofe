@@ -537,6 +537,12 @@ bool        libra_options_menu_item_selected(const libra_options_menu_t *menu, u
 int         libra_options_menu_scroll_offset(const libra_options_menu_t *menu);
 int         libra_options_menu_total_count(const libra_options_menu_t *menu);
 
+/* ---- Aspect ratio table ------------------------------------------------- */
+#include "../src/ratio.h"
+
+/* ---- EmuLnk companion protocol ------------------------------------------ */
+#include "../src/emulnk.h"
+
 #ifdef __cplusplus
 }
 #endif

@@ -89,4 +89,21 @@ int netsock_tcp_connect(const char *host, uint16_t port);
  * or -1 on failure. */
 int netsock_tcp_listen(uint16_t port);
 
+/* -------------------------------------------------------------------------
+ * UDP helpers (for EmuLnk companion protocol)
+ * ---------------------------------------------------------------------- */
+
+typedef int libra_socket_t;
+#define LIBRA_INVALID_SOCKET (-1)
+
+libra_socket_t libra_socket_udp(void);
+bool           libra_socket_bind(libra_socket_t sock, int port);
+void           libra_socket_set_nonblocking_udp(libra_socket_t sock);
+/* recvfrom/sendto wrappers — use void* for addr to avoid sys/socket.h in header */
+int            libra_socket_recvfrom(libra_socket_t sock, void *buf, int buflen,
+                                     void *from, void *fromlen);
+int            libra_socket_sendto(libra_socket_t sock, const void *buf, int len,
+                                   const void *to, unsigned tolen);
+void           libra_socket_close(libra_socket_t sock);
+
 #endif /* LIBRA_NETSOCK_H */

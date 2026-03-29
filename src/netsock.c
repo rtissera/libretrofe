@@ -193,3 +193,46 @@ int netsock_tcp_listen(uint16_t port)
     close(fd);
     return -1;
 }
+
+/* =========================================================================
+ * UDP helpers (for EmuLnk companion protocol)
+ * ====================================================================== */
+
+libra_socket_t libra_socket_udp(void)
+{
+    return socket(AF_INET, SOCK_DGRAM, 0);
+}
+
+bool libra_socket_bind(libra_socket_t sock, int port)
+{
+    struct sockaddr_in addr = {0};
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port        = htons((uint16_t)port);
+    return bind(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0;
+}
+
+void libra_socket_set_nonblocking_udp(libra_socket_t sock)
+{
+    netsock_set_nonblocking(sock);
+}
+
+int libra_socket_recvfrom(libra_socket_t sock, void *buf, int buflen,
+                           void *from, void *fromlen)
+{
+    return (int)recvfrom(sock, buf, (size_t)buflen, 0,
+                         (struct sockaddr*)from, (socklen_t*)fromlen);
+}
+
+int libra_socket_sendto(libra_socket_t sock, const void *buf, int len,
+                         const void *to, unsigned tolen)
+{
+    return (int)sendto(sock, buf, (size_t)len, 0,
+                       (const struct sockaddr*)to, (socklen_t)tolen);
+}
+
+void libra_socket_close(libra_socket_t sock)
+{
+    if (sock != LIBRA_INVALID_SOCKET)
+        close(sock);
+}
