@@ -543,7 +543,24 @@ bool libra_environment_cb(unsigned cmd, void *data)
             unsigned bpp = (ctx->pixel_format == RETRO_PIXEL_FORMAT_XRGB8888)
                            ? 4 : 2;
             size_t pitch  = (size_t)fb->width * bpp;
-            size_t needed = pitch * fb->height;
+            /* Size the backing allocation for the core's worst-case geometry
+             * (max_width × max_height) rather than the per-frame width/height.
+             * Some cores (e.g. ClownMDEmu) only call this once at scanline 0
+             * with the *current* width but later write rows wider than that
+             * when the emulated display switches modes mid-frame
+             * (Mega Drive H32 → H40, 256 → 320). Returning a buffer sized
+             * for fb->width × fb->height in that case overflows the heap.
+             * The pitch we report stays width*bpp (per libretro spec); the
+             * extra capacity is only there to absorb writes past the row. */
+            size_t alloc_w = fb->width;
+            size_t alloc_h = fb->height;
+            if (ctx->core) {
+                if (ctx->core->av_info.geometry.max_width > alloc_w)
+                    alloc_w = ctx->core->av_info.geometry.max_width;
+                if (ctx->core->av_info.geometry.max_height > alloc_h)
+                    alloc_h = ctx->core->av_info.geometry.max_height;
+            }
+            size_t needed = alloc_w * (size_t)bpp * alloc_h;
             if (needed > ctx->sw_fb_size) {
                 free(ctx->sw_fb);
                 ctx->sw_fb = malloc(needed);
