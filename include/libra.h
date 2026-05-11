@@ -476,12 +476,51 @@ enum libra_display_mode {
 };
 
 /* Convert a libretro frame buffer to RGBA8.
+ *
+ * NOTE: this is a software fallback for frontends that cannot upload the
+ * native pixel format directly.  GPU-accelerated frontends SHOULD upload
+ * the native format and skip this entirely — see libra_video_format_info()
+ * for the per-format GL/Vulkan/SDL upload hints.  All three libretro
+ * formats map to direct GPU sampler types on every modern API.
+ *
  * pixel_format: 0=XRGB1555, 1=XRGB8888, 2=RGB565.
  * pitch is the source row stride in bytes.
  * dst must be at least w*h*4 bytes. */
 void libra_convert_to_rgba(const void *src, unsigned w, unsigned h,
                            size_t pitch, int pixel_format,
                            unsigned char *dst);
+
+/* Same conventions as libra_convert_to_rgba, but produces RGB565 (16bpp).
+ * Useful for software targets that want to stay at 16 bits per pixel. */
+void libra_convert_to_rgb565(const void *src, unsigned w, unsigned h,
+                             size_t pitch, int pixel_format,
+                             unsigned char *dst);
+
+/* Pixel-format upload metadata.  Filled by libra_video_format_info().
+ * Numeric API constants are duplicated rather than #include'd so this
+ * header stays free of GL/Vulkan/SDL transitive dependencies. */
+struct libra_video_format_info {
+    const char *name;
+    unsigned    bytes_per_pixel;
+    /* OpenGL */
+    unsigned    gl_internalformat;     /* glTexImage2D internalformat */
+    unsigned    gl_format;             /* glTexImage2D format         */
+    unsigned    gl_type;               /* glTexImage2D type           */
+    /* Vulkan */
+    unsigned    vk_format;             /* VkFormat enum value         */
+    /* SDL2 */
+    unsigned    sdl_pixelformat;       /* SDL_PIXELFORMAT_*           */
+    /* True when the channel order matches what the GPU sampler expects
+     * directly with the constants above.  All three libretro formats are
+     * currently true (with the standard BGRA / 5_6_5 / 1_5_5_5_REV
+     * triples) but the flag lets future formats add a swizzle hint. */
+    bool        channel_order_matches_gpu;
+};
+
+/* Look up per-format upload hints.  Returns true on success and fills *out;
+ * returns false for an unknown pixel_format. */
+bool libra_video_format_info(int pixel_format,
+                             struct libra_video_format_info *out);
 
 /* Compute the display viewport rect for a game frame.
  * Handles rotation, aspect ratio, integer scaling, and stretch modes.
