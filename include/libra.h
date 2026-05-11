@@ -20,6 +20,13 @@ typedef void    (*libra_audio_cb_t)(void *ud, const int16_t *data, size_t frames
 typedef void    (*libra_input_poll_cb_t)(void *ud);
 typedef int16_t (*libra_input_state_cb_t)(void *ud,
                     unsigned port, unsigned device, unsigned index, unsigned id);
+/* Optional fast-path for RETRO_DEVICE_ID_JOYPAD_MASK.  When set, libra
+ * forwards mask queries to this callback in a single indirect call
+ * instead of synthesizing the mask by polling each of the 16 buttons
+ * via input_state — saves ~16x per query, which matters because many
+ * cores (FBNeo, fceumm, snes9x, picodrive, …) poll the mask every
+ * frame per port.  Return a 16-bit RETRO_DEVICE_ID_JOYPAD_* bitmask. */
+typedef int16_t (*libra_input_state_mask_cb_t)(void *ud, unsigned port);
 /* effect: 0=strong, 1=weak (matches retro_rumble_effect); strength: 0-65535 */
 typedef void    (*libra_rumble_cb_t)(void *ud,
                     unsigned port, unsigned effect, uint16_t strength);
@@ -55,6 +62,9 @@ typedef struct {
     libra_audio_cb_t       audio;
     libra_input_poll_cb_t  input_poll;
     libra_input_state_cb_t input_state;
+    /* Optional one-shot mask provider for JOYPAD_MASK.  When NULL, libra
+     * falls back to 16 calls of input_state — correct but slow. */
+    libra_input_state_mask_cb_t input_state_mask;
     libra_rumble_cb_t      rumble;          /* optional; NULL = no rumble */
     libra_led_cb_t         led;             /* optional; NULL = no LED */
     libra_sensor_set_state_cb_t sensor_set_state; /* optional */

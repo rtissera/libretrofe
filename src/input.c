@@ -54,6 +54,28 @@ int16_t libra_input_state(libra_ctx_t *ctx,
     if (!ctx->config.input_state)
         return 0;
 
+    /* JOYPAD_MASK fast-path: prefer the host's mask callback if it's
+     * registered.  Saves 16 indirect calls per mask query, which adds up
+     * fast on cores that poll the mask every frame per port. */
+    if (device == RETRO_DEVICE_JOYPAD && id == RETRO_DEVICE_ID_JOYPAD_MASK
+        && ctx->config.input_state_mask) {
+        int16_t raw = ctx->config.input_state_mask(ctx->config.userdata, port);
+        if (!ctx->remap_loaded || port >= 16)
+            return raw;
+        /* Apply the remap by permuting bits.  remap[port][btn] tells us
+         * which physical button supplies bit `btn` in the core-facing
+         * mask, so we walk the raw host bits, look up the remap, and
+         * rebuild. */
+        int16_t out = 0;
+        for (unsigned btn = 0; btn < 16; btn++) {
+            int8_t  r        = ctx->remap[port][btn];
+            unsigned src_bit = (r >= 0) ? (unsigned)r : btn;
+            if (raw & (1 << src_bit))
+                out |= (int16_t)(1 << btn);
+        }
+        return out;
+    }
+
     /* Apply joypad remapping */
     if (device == RETRO_DEVICE_JOYPAD && ctx->remap_loaded && port < 16) {
         if (id == RETRO_DEVICE_ID_JOYPAD_MASK) {
@@ -78,7 +100,8 @@ int16_t libra_input_state(libra_ctx_t *ctx,
         }
     }
 
-    /* Non-remapped bitmask synthesis for joypad without remap */
+    /* Non-remapped bitmask synthesis for joypad without remap and
+     * without an input_state_mask fast-path. */
     if (device == RETRO_DEVICE_JOYPAD && id == RETRO_DEVICE_ID_JOYPAD_MASK) {
         int16_t mask = 0;
         for (unsigned btn = RETRO_DEVICE_ID_JOYPAD_B;
