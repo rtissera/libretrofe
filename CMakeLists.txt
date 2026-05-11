@@ -28,7 +28,6 @@ add_library(libra
     src/ratio.c
     src/emulnk.c
     deps/miniz.c
-    deps/zstd.c
 )
 
 target_include_directories(libra
