@@ -188,7 +188,7 @@ unsigned libra_shader_extract_params(const char *source,
 
         param.value = param.def;
 
-        if (param.step <= 0.0f) param.step = 1.0f;
+        if (param.step <= 0.0f) param.step = 0.02f;
 
         /* Check for duplicates */
         bool dup = false;
