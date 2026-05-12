@@ -56,6 +56,56 @@ static void resolve_path(char *out, size_t out_size,
     }
 }
 
+/* In-place expansion of `$KEY$` wildcards in a path against a context table.
+ * Wildcard format mirrors librashader's `\$([A-Z-_]+)\$`: letters, digits,
+ * hyphens and underscores between two `$`.  Unknown keys are left untouched
+ * so unsupported tokens remain visible in the resulting path (and the
+ * caller's file-existence check will then fail noisily). */
+static void expand_wildcards(char *path, size_t bufsize,
+                             const libra_shader_context_item_t *items,
+                             unsigned item_count)
+{
+    if (!items || item_count == 0 || !path) return;
+    if (!strchr(path, '$')) return; /* fast path: nothing to replace */
+
+    char tmp[1024];
+    size_t out = 0;
+    const char *p = path;
+    while (*p && out < sizeof(tmp) - 1) {
+        if (*p == '$') {
+            const char *start = p + 1;
+            const char *end = start;
+            while (*end && (isupper((unsigned char)*end)
+                            || isdigit((unsigned char)*end)
+                            || *end == '_' || *end == '-')) end++;
+            if (*end == '$' && end > start) {
+                char key[64];
+                size_t kl = (size_t)(end - start);
+                if (kl >= sizeof(key)) kl = sizeof(key) - 1;
+                memcpy(key, start, kl); key[kl] = '\0';
+                const char *replacement = NULL;
+                for (unsigned i = 0; i < item_count; i++) {
+                    if (items[i].name && strcmp(items[i].name, key) == 0) {
+                        replacement = items[i].value;
+                        break;
+                    }
+                }
+                if (replacement) {
+                    size_t rl = strlen(replacement);
+                    if (out + rl >= sizeof(tmp)) rl = sizeof(tmp) - 1 - out;
+                    memcpy(tmp + out, replacement, rl);
+                    out += rl;
+                    p = end + 1;
+                    continue;
+                }
+            }
+        }
+        tmp[out++] = *p++;
+    }
+    tmp[out] = '\0';
+    snprintf(path, bufsize, "%s", tmp);
+}
+
 /* Check if string ends with suffix (case-insensitive) */
 static bool ends_with_ci(const char *s, const char *suffix)
 {
@@ -287,14 +337,24 @@ static void extract_params_with_includes(const char *source, const char *base_di
 
 #define LIBRA_PRESET_MAX_DEPTH 8
 
-static bool preset_load_internal(libra_shader_preset_t *out, const char *path, int depth);
+static bool preset_load_internal(libra_shader_preset_t *out, const char *path, int depth,
+                                  const libra_shader_context_item_t *items,
+                                  unsigned item_count);
 
 bool libra_shader_preset_load(libra_shader_preset_t *out, const char *path)
 {
-    return preset_load_internal(out, path, 0);
+    return preset_load_internal(out, path, 0, NULL, 0);
 }
 
-static bool preset_load_internal(libra_shader_preset_t *out, const char *path, int depth)
+bool libra_shader_preset_load_ctx(libra_shader_preset_t *out, const char *path,
+    const libra_shader_context_item_t *items, unsigned item_count)
+{
+    return preset_load_internal(out, path, 0, items, item_count);
+}
+
+static bool preset_load_internal(libra_shader_preset_t *out, const char *path, int depth,
+                                  const libra_shader_context_item_t *items,
+                                  unsigned item_count)
 {
     if (!out || !path) return false;
     if (depth > LIBRA_PRESET_MAX_DEPTH) {
@@ -339,8 +399,11 @@ static bool preset_load_internal(libra_shader_preset_t *out, const char *path, i
             char ref_rel[512];
             snprintf(ref_rel, sizeof(ref_rel), "%.*s", (int)rlen, rp);
             char ref_path[1024];
-            resolve_path(ref_path, sizeof(ref_path), base_dir, ref_rel);
-            if (!preset_load_internal(out, ref_path, depth + 1)) {
+            char ref_exp[1024];
+            snprintf(ref_exp, sizeof(ref_exp), "%s", ref_rel);
+            expand_wildcards(ref_exp, sizeof(ref_exp), items, item_count);
+            resolve_path(ref_path, sizeof(ref_path), base_dir, ref_exp);
+            if (!preset_load_internal(out, ref_path, depth + 1, items, item_count)) {
                 fclose(rf);
                 return false;
             }
@@ -427,8 +490,12 @@ static bool preset_load_internal(libra_shader_preset_t *out, const char *path, i
             if (strncmp(key, "shader", 6) == 0 && klen > 6 && isdigit((unsigned char)key[6])) {
                 idx = atoi(key + 6);
                 if (idx >= 0 && idx < (int)out->pass_count) {
-                    resolve_path(out->passes[idx].path, sizeof(out->passes[idx].path),
-                                 out->base_dir, val);
+                    char exp[1024];
+                    snprintf(exp, sizeof(exp), "%s", val);
+                    expand_wildcards(exp, sizeof(exp), items, item_count);
+                    resolve_path(out->passes[idx].path,
+                                 sizeof(out->passes[idx].path),
+                                 out->base_dir, exp);
                 }
                 continue;
             }
@@ -541,8 +608,11 @@ static bool preset_load_internal(libra_shader_preset_t *out, const char *path, i
             if (lut_names[i][0] == '\0') continue;
 
             if (strcmp(key, lut_names[i]) == 0) {
+                char exp[1024];
+                snprintf(exp, sizeof(exp), "%s", val);
+                expand_wildcards(exp, sizeof(exp), items, item_count);
                 resolve_path(out->luts[i].path, sizeof(out->luts[i].path),
-                             out->base_dir, val);
+                             out->base_dir, exp);
                 break;
             }
 

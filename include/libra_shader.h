@@ -57,6 +57,22 @@ typedef struct {
     float value, def, minimum, maximum, step;
 } libra_shader_param_t;
 
+/* Context item for wildcard substitution in preset paths.
+ * librashader / RetroArch slang-shaders accept `$KEY$` tokens in shader and
+ * texture paths (e.g. `shader0 = "$PRESET_DIR$/foo.slang"`).  Pass an array
+ * of these into libra_shader_preset_load_ctx() to enable expansion.
+ *
+ * Canonical names recognized by librashader:
+ *   CONTENT-DIR, CORE, GAME, PRESET, PRESET_DIR, VID-DRV, CORE-REQ-ROT,
+ *   VID-ALLOW-CORE-ROT, VID-USER-ROT, VID-FINAL-ROT, SCREEN-ORIENT,
+ *   VIEW-ASPECT-ORIENT, CORE-ASPECT-ORIENT, EXT
+ * The matching is case-sensitive and exact; any unknown key is left
+ * unexpanded in the path. */
+typedef struct {
+    const char *name;
+    const char *value;
+} libra_shader_context_item_t;
+
 typedef struct {
     int      is_slang;         /* 0=glsl, 1=slang (detected from shader0 extension) */
     unsigned pass_count;
@@ -70,6 +86,13 @@ typedef struct {
 
 /* Parse a .glslp or .slangp preset file.  Resolves relative paths. */
 bool libra_shader_preset_load(libra_shader_preset_t *out, const char *path);
+
+/* Same as libra_shader_preset_load, but with wildcard context substitution.
+ * Pass items=NULL or item_count=0 for behaviour identical to the plain
+ * variant.  Items are matched case-sensitively against `$NAME$` tokens in
+ * shader/texture paths after relative-path resolution. */
+bool libra_shader_preset_load_ctx(libra_shader_preset_t *out, const char *path,
+    const libra_shader_context_item_t *items, unsigned item_count);
 
 /* Extract #pragma parameter lines from shader source into params[].
  * Returns number of parameters found. */
