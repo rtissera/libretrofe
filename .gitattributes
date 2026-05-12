@@ -1,0 +1,10 @@
+# Linguist hints for GitHub language stats
+
+# Treat ambiguous .h headers as C (libra is C, not C++)
+*.h linguist-language=C
+
+# Vendored single-file libraries and pulled-in headers
+deps/libretro.h    linguist-vendored
+deps/miniz.c       linguist-vendored
+deps/miniz.h       linguist-vendored
+deps/stb_image.h   linguist-vendored
