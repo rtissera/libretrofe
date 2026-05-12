@@ -88,6 +88,7 @@ static int parse_scale_type(const char *s)
     if (strcmp(s, "source") == 0)   return LIBRA_SCALE_SOURCE;
     if (strcmp(s, "viewport") == 0) return LIBRA_SCALE_VIEWPORT;
     if (strcmp(s, "absolute") == 0) return LIBRA_SCALE_ABSOLUTE;
+    if (strcmp(s, "original") == 0) return LIBRA_SCALE_ORIGINAL;
     return LIBRA_SCALE_SOURCE;
 }
 

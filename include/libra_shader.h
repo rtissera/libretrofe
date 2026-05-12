@@ -17,7 +17,10 @@ extern "C" {
 enum libra_scale_type {
     LIBRA_SCALE_SOURCE   = 0,
     LIBRA_SCALE_VIEWPORT = 1,
-    LIBRA_SCALE_ABSOLUTE = 2
+    LIBRA_SCALE_ABSOLUTE = 2,
+    LIBRA_SCALE_ORIGINAL = 3   /* librashader 4th type: scale relative to
+                                  the chain's *original* input (the core
+                                  output), not the immediate previous pass. */
 };
 
 enum libra_wrap_mode {
