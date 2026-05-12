@@ -22,6 +22,14 @@ target_include_directories(video_unit PRIVATE
     ${CMAKE_SOURCE_DIR}/deps)
 target_compile_options(video_unit PRIVATE -Wall -Wextra -Wpedantic -O2)
 
+# Shader preset parser — standalone build (shader.c has no other deps).
+add_executable(shader_unit shader_unit.c ${CMAKE_SOURCE_DIR}/src/shader.c)
+target_include_directories(shader_unit PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/deps)
+target_compile_options(shader_unit PRIVATE -Wall -Wextra -Wpedantic -O2)
+
 # Audio resampler — same standalone build pattern.
 foreach(_t audio_unit audio_fuzz)
     add_executable(${_t} ${_t}.c ${CMAKE_SOURCE_DIR}/src/audio.c)
