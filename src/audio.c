@@ -162,10 +162,20 @@ void libra_audio_flush(libra_audio_t *a,
     int16_t *out       = a->out_buf;
 
     while (out_count < soft_cap) {
-        /* Stop when we have no more input AND haven't accumulated enough
-         * fractional progress for the consume loop to fire — mirrors the
-         * previous version's `if (avail == 0 && frac < 1.0) break`. */
-        if (avail == 0 && frac < WHOLE)
+        /* Stop when we have no more input. Previously this only broke when
+         * `frac < WHOLE` too, but at ratio = WHOLE (exact-passthrough, NES
+         * fceumm and FBNeo at 48 kHz → 48 kHz) frac always exits a consume
+         * step at 0 then increments back to WHOLE on the next output, so
+         * the condition never held and the loop kept emitting
+         * `cur = prev` (held-last-sample) outputs until out_count hit the
+         * +2 budget in soft_cap. Those extra outputs grew the SDL queue
+         * AND left frac = N·WHOLE, which on the next flush forced the
+         * inner consume to skip the first new input, silently dropping it.
+         * Net result: phase drift + sample loss every flush, degrading
+         * audibly to noise in ~seconds. Upsampling cores (Stella, PCE)
+         * dodged this because their ratio < WHOLE keeps frac mid-step at
+         * EOF, satisfying the old break condition. */
+        if (avail == 0)
             break;
 
         /* Consume input while frac crosses whole-sample boundaries. */
