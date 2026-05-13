@@ -22,8 +22,10 @@ target_include_directories(video_unit PRIVATE
     ${CMAKE_SOURCE_DIR}/deps)
 target_compile_options(video_unit PRIVATE -Wall -Wextra -Wpedantic -O2)
 
-# Shader preset parser — standalone build (shader.c has no other deps).
-add_executable(shader_unit shader_unit.c ${CMAKE_SOURCE_DIR}/src/shader.c)
+# Shader preset parser + SPIR-V reflection — links the full libra so the
+# slang_spirv tests can call libra_slang_compile_spirv + reflection APIs.
+add_executable(shader_unit shader_unit.c)
+target_link_libraries(shader_unit PRIVATE libra)
 target_include_directories(shader_unit PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src

@@ -239,6 +239,136 @@ static void test_param_explicit_step_kept(void)
     ASSERT(params[0].step == 0.5f);
 }
 
+/* ---------- WrapMode parsing ---------- */
+
+static void test_wrap_mode_clamp_to_border(void)
+{
+    char dir[256];
+    make_tempdir(dir, sizeof(dir), "wrap-border");
+
+    write_file(dir, "s.slang", "// stub\n");
+    write_file(dir, "p.slangp",
+               "shaders = 1\n"
+               "shader0 = \"s.slang\"\n"
+               "wrap_mode0 = \"clamp_to_border\"\n");
+
+    char path[512]; snprintf(path, sizeof(path), "%s/p.slangp", dir);
+    libra_shader_preset_t p; memset(&p, 0, sizeof(p));
+    ASSERT(libra_shader_preset_load(&p, path));
+    ASSERT(p.passes[0].wrap_mode == LIBRA_WRAP_BORDER);
+}
+
+static void test_wrap_mode_clamp_to_edge_still_works(void)
+{
+    char dir[256];
+    make_tempdir(dir, sizeof(dir), "wrap-edge");
+
+    write_file(dir, "s.slang", "// stub\n");
+    write_file(dir, "p.slangp",
+               "shaders = 1\n"
+               "shader0 = \"s.slang\"\n"
+               "wrap_mode0 = \"clamp_to_edge\"\n");
+
+    char path[512]; snprintf(path, sizeof(path), "%s/p.slangp", dir);
+    libra_shader_preset_t p; memset(&p, 0, sizeof(p));
+    ASSERT(libra_shader_preset_load(&p, path));
+    ASSERT(p.passes[0].wrap_mode == LIBRA_WRAP_CLAMP);
+}
+
+/* ---------- Push-constant reflection ---------- */
+
+static void test_pc_reflection_round_trip(void)
+{
+    /* Tiny slang with a push_constant block holding MVP + OutputSize + a param. */
+    const char *src =
+        "#version 450\n"
+        "#pragma stage vertex\n"
+        "layout(push_constant) uniform Push {\n"
+        "    mat4 MVP;\n"
+        "    vec4 OutputSize;\n"
+        "    float TestParam;\n"
+        "} regs;\n"
+        "layout(location = 0) in vec4 Position;\n"
+        "layout(location = 0) out vec2 vTexCoord;\n"
+        "void main() { gl_Position = regs.MVP * Position; vTexCoord = Position.xy; }\n"
+        "#pragma stage fragment\n"
+        "layout(push_constant) uniform Push {\n"
+        "    mat4 MVP;\n"
+        "    vec4 OutputSize;\n"
+        "    float TestParam;\n"
+        "} regs;\n"
+        "layout(location = 0) in vec2 vTexCoord;\n"
+        "layout(location = 0) out vec4 FragColor;\n"
+        "void main() { FragColor = vec4(regs.TestParam); }\n";
+
+    uint32_t *vs = NULL, *fs = NULL;
+    size_t vs_w = 0, fs_w = 0;
+    char fmt[64] = {};
+    ASSERT(libra_slang_compile_spirv(src, strlen(src), NULL,
+                                      &vs, &vs_w, &fs, &fs_w,
+                                      fmt, sizeof(fmt)));
+    ASSERT(fs && fs_w > 0);
+
+    libra_ubo_member_t members[16];
+    unsigned member_count = 16;
+    uint32_t pc_size = 0;
+    ASSERT(libra_spirv_reflect_push_constants(fs, fs_w, &pc_size,
+                                              members, &member_count));
+    ASSERT(pc_size >= 64 + 16 + 4);  /* mat4 + vec4 + float, plus alignment */
+    ASSERT(member_count == 3);
+
+    bool sawMVP = false, sawOut = false, sawParam = false;
+    for (unsigned i = 0; i < member_count; i++) {
+        if (strcmp(members[i].name, "MVP") == 0) {
+            ASSERT(members[i].size == 64);
+            sawMVP = true;
+        } else if (strcmp(members[i].name, "OutputSize") == 0) {
+            ASSERT(members[i].size == 16);
+            sawOut = true;
+        } else if (strcmp(members[i].name, "TestParam") == 0) {
+            ASSERT(members[i].size == 4);
+            sawParam = true;
+        }
+    }
+    ASSERT(sawMVP); ASSERT(sawOut); ASSERT(sawParam);
+
+    libra_spirv_free(vs);
+    libra_spirv_free(fs);
+}
+
+static void test_pc_reflection_absent(void)
+{
+    /* Shader with only UBO, no push_constant block: API returns true with size=0. */
+    const char *src =
+        "#version 450\n"
+        "#pragma stage vertex\n"
+        "layout(set = 0, binding = 0, std140) uniform UBO { mat4 MVP; } global;\n"
+        "layout(location = 0) in vec4 Position;\n"
+        "void main() { gl_Position = global.MVP * Position; }\n"
+        "#pragma stage fragment\n"
+        "layout(set = 0, binding = 0, std140) uniform UBO { mat4 MVP; } global;\n"
+        "layout(location = 0) out vec4 FragColor;\n"
+        "void main() { FragColor = global.MVP[0]; }\n";
+
+    uint32_t *vs = NULL, *fs = NULL;
+    size_t vs_w = 0, fs_w = 0;
+    char fmt[64] = {};
+    ASSERT(libra_slang_compile_spirv(src, strlen(src), NULL,
+                                      &vs, &vs_w, &fs, &fs_w,
+                                      fmt, sizeof(fmt)));
+
+    libra_ubo_member_t members[16];
+    unsigned member_count = 16;
+    uint32_t pc_size = 0;
+    ASSERT(libra_spirv_reflect_push_constants(fs, fs_w, &pc_size,
+                                              members, &member_count));
+    ASSERT(pc_size == 0);
+    ASSERT(member_count == 0);
+
+    libra_spirv_free(vs);
+    libra_spirv_free(fs);
+}
+
 /* ---------- MAX_PASSES headroom ---------- */
 
 static void test_max_passes_raised(void)
@@ -260,12 +390,16 @@ int main(void)
     test_wildcard_in_lut_path();
     test_param_step_default_is_002();
     test_param_explicit_step_kept();
+    test_wrap_mode_clamp_to_border();
+    test_wrap_mode_clamp_to_edge_still_works();
+    test_pc_reflection_round_trip();
+    test_pc_reflection_absent();
     test_max_passes_raised();
 
     if (g_fail) {
         fprintf(stderr, "shader_unit: FAILED\n");
         return 1;
     }
-    fprintf(stderr, "shader_unit: 11 tests OK\n");
+    fprintf(stderr, "shader_unit: 15 tests OK\n");
     return 0;
 }

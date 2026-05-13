@@ -24,9 +24,10 @@ enum libra_scale_type {
 };
 
 enum libra_wrap_mode {
-    LIBRA_WRAP_CLAMP    = 0,
+    LIBRA_WRAP_CLAMP    = 0,  /* clamp_to_edge */
     LIBRA_WRAP_REPEAT   = 1,
-    LIBRA_WRAP_MIRRORED = 2
+    LIBRA_WRAP_MIRRORED = 2,
+    LIBRA_WRAP_BORDER   = 3   /* clamp_to_border (GLES falls back to clamp_to_edge) */
 };
 
 typedef struct {
@@ -156,6 +157,14 @@ bool libra_spirv_reflect_ubo(const uint32_t *spirv, size_t words,
  * On input *count is max capacity; on output actual count written. */
 bool libra_spirv_reflect_samplers(const uint32_t *spirv, size_t words,
     libra_sampler_binding_t *samplers, unsigned *count);
+
+/* Reflect push-constant block members from SPIR-V (use fragment shader words).
+ * pc_size_out receives total declared struct size in bytes (0 if absent).
+ * On input *member_count is max capacity; on output actual count written.
+ * Returns true even when no push_constant block exists. */
+bool libra_spirv_reflect_push_constants(const uint32_t *spirv, size_t words,
+    uint32_t *pc_size_out,
+    libra_ubo_member_t *members, unsigned *member_count);
 
 #ifdef __cplusplus
 }

@@ -602,3 +602,72 @@ extern "C" bool libra_spirv_reflect_samplers(
     spvc_context_destroy(ctx);
     return true;
 }
+
+/* Reflect push-constant block members from SPIR-V (use fragment shader words).
+ * On input *member_count is max capacity; on output actual count written.
+ * pc_size_out receives total declared struct size in bytes (0 if no PC block).
+ * Returns true even when no PC block exists (out values just stay zero). */
+extern "C" bool libra_spirv_reflect_push_constants(
+    const uint32_t *spirv, size_t words,
+    uint32_t *pc_size_out,
+    libra_ubo_member_t *members, unsigned *member_count)
+{
+    if (!spirv || words == 0 || !pc_size_out || !members || !member_count)
+        return false;
+
+    unsigned cap = *member_count;
+    *member_count = 0;
+    *pc_size_out = 0;
+
+    spvc_context ctx = NULL;
+    if (spvc_context_create(&ctx) != SPVC_SUCCESS) return false;
+
+    spvc_parsed_ir ir = NULL;
+    if (spvc_context_parse_spirv(ctx, spirv, words, &ir) != SPVC_SUCCESS) {
+        spvc_context_destroy(ctx); return false;
+    }
+
+    spvc_compiler compiler = NULL;
+    if (spvc_context_create_compiler(ctx, SPVC_BACKEND_NONE, ir,
+            SPVC_CAPTURE_MODE_TAKE_OWNERSHIP, &compiler) != SPVC_SUCCESS) {
+        spvc_context_destroy(ctx); return false;
+    }
+
+    spvc_resources resources = NULL;
+    spvc_compiler_create_shader_resources(compiler, &resources);
+
+    const spvc_reflected_resource *pcs = NULL;
+    size_t num_pcs = 0;
+    spvc_resources_get_resource_list_for_type(resources,
+        SPVC_RESOURCE_TYPE_PUSH_CONSTANT, &pcs, &num_pcs);
+
+    if (num_pcs == 0) { spvc_context_destroy(ctx); return true; }
+
+    /* Slang convention: at most one push-constant block per stage. */
+    spvc_type type = spvc_compiler_get_type_handle(compiler, pcs[0].base_type_id);
+    unsigned num_members = spvc_type_get_num_member_types(type);
+
+    size_t pc_size = 0;
+    spvc_compiler_get_declared_struct_size(compiler, type, &pc_size);
+    *pc_size_out = (uint32_t)pc_size;
+
+    unsigned written = 0;
+    for (unsigned i = 0; i < num_members && written < cap; i++) {
+        const char *name = spvc_compiler_get_member_name(
+            compiler, pcs[0].base_type_id, i);
+        uint32_t offset = 0;
+        spvc_compiler_type_struct_member_offset(compiler, type, i, &offset);
+        size_t msize = 0;
+        spvc_compiler_get_declared_struct_member_size(compiler, type, i, &msize);
+        if (name && name[0]) {
+            strncpy(members[written].name, name, sizeof(members[written].name) - 1);
+            members[written].name[sizeof(members[written].name) - 1] = '\0';
+            members[written].offset = offset;
+            members[written].size   = (uint32_t)msize;
+            written++;
+        }
+    }
+    *member_count = written;
+    spvc_context_destroy(ctx);
+    return true;
+}

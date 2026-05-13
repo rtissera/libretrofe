@@ -127,7 +127,7 @@ static int parse_wrap_mode(const char *s)
     if (strcmp(s, "repeat") == 0)         return LIBRA_WRAP_REPEAT;
     if (strcmp(s, "mirrored_repeat") == 0) return LIBRA_WRAP_MIRRORED;
     if (strcmp(s, "clamp_to_edge") == 0)  return LIBRA_WRAP_CLAMP;
-    if (strcmp(s, "clamp_to_border") == 0) return LIBRA_WRAP_CLAMP;
+    if (strcmp(s, "clamp_to_border") == 0) return LIBRA_WRAP_BORDER;
     return LIBRA_WRAP_CLAMP;
 }
 
